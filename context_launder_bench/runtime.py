@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 
 from .model import (
-    AuthorizedActionSpec, BusinessValue, Event, RuntimeEnvelope, ToolRequest,
+    ApprovalRecord, AuthorizedActionSpec, BusinessValue, Event, RuntimeEnvelope, ToolRequest,
     TrustedAuthorizationContext, canonical, digest,
 )
 
@@ -44,6 +44,9 @@ class TrustedRuntime:
         self.__revoked: set[str] = set()
         self.__capabilities: dict[str, tuple[str, frozenset[str]]] = {}
         self.__authorized_action_spec: AuthorizedActionSpec | None = None
+        self.__issuer_authority: dict[str, dict[str, frozenset[str]]] = {}
+        self.__approvals: dict[str, ApprovalRecord] = {}
+        self.__approval_version = 0
         self.__memory: dict[str, str] = {}
         self.__value_counter = 0
         self.__context_counter = 0
@@ -105,6 +108,139 @@ class TrustedRuntime:
     def authorized_action_spec(self) -> AuthorizedActionSpec | None:
         return self.__authorized_action_spec
 
+    def grant_issuer_authority(
+        self, issuer: str, tool_resources: Mapping[str, Iterable[str]]
+    ) -> None:
+        granted = {tool: frozenset(resources)
+                   for tool, resources in tool_resources.items()}
+        self.__issuer_authority[issuer] = granted
+        self.__approval_version += 1
+        self.event("IssuerAuthorityGrant", issuer=issuer,
+                   tool_resources={tool: tuple(sorted(resources))
+                                   for tool, resources in granted.items()},
+                   ledger_version=self.__approval_version)
+
+    def register_approval(self, record: ApprovalRecord) -> None:
+        if record.approval_id in self.__approvals:
+            raise ValueError("Duplicate approval ID")
+        self.__approvals[record.approval_id] = deepcopy(record)
+        self.__approval_version += 1
+        self.event("ApprovalRegistered",
+                   approval_id=record.approval_id,
+                   issuer=record.issuer, executor=record.executor_id,
+                   task_id=record.task_id,
+                   action_digest=record.action_spec.binding_digest(),
+                   active=record.active,
+                   ledger_version=self.__approval_version)
+
+    @property
+    def has_approval_ledger(self) -> bool:
+        return bool(self.__approvals)
+
+    def approval_record(self, approval_id: str) -> ApprovalRecord | None:
+        record = self.__approvals.get(approval_id)
+        return deepcopy(record) if record is not None else None
+
+    def approval_records(self) -> tuple[ApprovalRecord, ...]:
+        return tuple(deepcopy(self.__approvals[key])
+                     for key in sorted(self.__approvals))
+
+    def approval_relation(self, request: ToolRequest) -> dict[str, Any]:
+        """Read-only, uniform relation for the stateful workflow."""
+        record = self.__approvals.get(request.approval_ref or "")
+        context = self.context(request.runtime_context_ref)
+        proposal_value = self.value(request.value_id)
+        payload = proposal_value.payload if proposal_value else None
+        parents = self.parents(request.value_id) or ()
+        joined_value = self.value(parents[0]) if len(parents) == 1 else None
+        joined_payload = joined_value.payload if joined_value else None
+        join_ref_match = (
+            isinstance(joined_payload, Mapping)
+            and joined_payload.get("approval_ref") == request.approval_ref
+        )
+        joined_parents = self.parents(joined_value.value_id) if joined_value else None
+        approval_parent = (
+            self.value(joined_parents[1])
+            if joined_parents is not None and len(joined_parents) == 2
+            else None
+        )
+        approval_items = approval_parent.payload if approval_parent else None
+        approval_branch_match = bool(
+            record and joined_value
+            and self.transform(joined_value.value_id) in {"join", "identity-transport"}
+            and joined_parents is not None and len(joined_parents) == 2
+            and self.source(joined_parents[1]) == "trusted_approval_ledger"
+            and isinstance(approval_items, list)
+            and isinstance(joined_payload, Mapping)
+            and isinstance(joined_payload.get("approval_record"), Mapping)
+            and any(
+                isinstance(item, Mapping)
+                and item.get("approval_id") == request.approval_ref
+                and item.get("issuer") == record.issuer
+                and item.get("executor_id") == record.executor_id
+                and item.get("task_id") == record.task_id
+                and item.get("active") == record.active
+                and item.get("action_digest") == record.action_spec.binding_digest()
+                and canonical(item) == canonical(joined_payload["approval_record"])
+                for item in approval_items
+            )
+        )
+        linked = (
+            isinstance(payload, Mapping)
+            and payload.get("approval_ref") == request.approval_ref
+            and payload.get("tool_name") == request.tool_name
+            and canonical(payload.get("arguments")) == canonical(request.arguments)
+        )
+        facts = {
+            "ledger_version": self.__approval_version,
+            "approval_ref": request.approval_ref,
+            "approval_exists": record is not None,
+            "approval_id": record.approval_id if record else None,
+            "issuer": record.issuer if record else None,
+            "approved_executor_id": record.executor_id if record else None,
+            "approved_task_id": record.task_id if record else None,
+            "approved_tool_name": record.action_spec.tool_name if record else None,
+            "approved_arguments": (
+                {key: choices[0] for key, choices in
+                 record.action_spec.allowed_arguments.items()}
+                if record and all(len(choices) == 1 for choices in
+                                  record.action_spec.allowed_arguments.values())
+                else None
+            ),
+            "issuer_allowed_resources": tuple(sorted(
+                self.__issuer_authority.get(record.issuer, {}).get(
+                    record.action_spec.tool_name, frozenset()
+                ))) if record else (),
+            "issuer_authorized": bool(
+                record and request.arguments.get("account") in
+                self.__issuer_authority.get(record.issuer, {}).get(
+                    record.action_spec.tool_name, frozenset())),
+            "executor_match": bool(record and
+                                   record.executor_id == request.executor_id),
+            "task_match": bool(record and context and
+                               record.task_id == context.task_id),
+            "action_match": bool(record and record.action_spec.permits(request)),
+            "active": bool(record and record.active),
+            "request_linked": linked,
+            "join_ref_match": join_ref_match,
+            "approval_branch_match": approval_branch_match,
+            "record_digest": digest({
+                "approval_id": record.approval_id,
+                "issuer": record.issuer,
+                "executor": record.executor_id,
+                "task": record.task_id,
+                "action": record.action_spec.binding_digest(),
+                "active": record.active,
+            }) if record else None,
+        }
+        facts["matched"] = all((
+            facts["approval_exists"], facts["issuer_authorized"],
+            facts["executor_match"], facts["task_match"],
+            facts["action_match"], facts["active"], facts["request_linked"],
+            facts["join_ref_match"], facts["approval_branch_match"],
+        ))
+        return facts
+
     def grant_capability(self, capability_id: str, executor_id: str,
                          tools: Iterable[str]) -> None:
         self.__capabilities[capability_id] = (executor_id, frozenset(tools))
@@ -114,6 +250,11 @@ class TrustedRuntime:
         return cap is not None and cap[0] == request.executor_id and request.tool_name in cap[1]
 
     def seed_value(self, payload: Any, source: str, context_ref: str) -> RuntimeEnvelope:
+        with self.__lock:
+            return self._seed_value_locked(payload, source, context_ref)
+
+    def _seed_value_locked(self, payload: Any, source: str,
+                           context_ref: str) -> RuntimeEnvelope:
         if context_ref not in self.__contexts:
             raise ValueError("Unknown trusted context")
         self.__value_counter += 1
@@ -302,9 +443,10 @@ class TrustedRuntime:
 
     def make_request(self, tool_name: str, arguments: Mapping[str, Any],
                      executor_id: str, capability_id: str, callsite_id: str,
-                     context_ref: str, value_id: str) -> ToolRequest:
+                     context_ref: str, value_id: str,
+                     approval_ref: str | None = None) -> ToolRequest:
         return ToolRequest(tool_name, deepcopy(dict(arguments)), executor_id, capability_id,
-                           callsite_id, context_ref, value_id)
+                           callsite_id, context_ref, value_id, approval_ref)
 
     def _corrupt_provenance_for_test(self, value_id: str) -> None:
         """Mutation-test hook; never used by runner or adapter."""

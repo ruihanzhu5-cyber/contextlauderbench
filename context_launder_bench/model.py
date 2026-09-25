@@ -21,6 +21,8 @@ class Decision(str, Enum):
 
 
 class DiscontinuityKind(str, Enum):
+    UNOBSERVED = "unobserved"
+    PRESERVED = "preserved"
     UNREPRESENTED = "unrepresented"
     DROPPED = "dropped"
     TRANSFORMED_WITHOUT_WITNESS = "transformed_without_witness"
@@ -60,6 +62,7 @@ class ToolRequest:
     callsite_id: str
     runtime_context_ref: str
     value_id: str
+    approval_ref: str | None = None
 
 
 @dataclass(frozen=True)
@@ -68,12 +71,24 @@ class AuthorizedActionSpec:
 
     tool_name: str
     allowed_arguments: Mapping[str, tuple[Any, ...]]
+    allowed_actions: tuple[Mapping[str, Any], ...] | None = None
 
     @classmethod
     def exact(cls, tool_name: str, arguments: Mapping[str, Any]) -> "AuthorizedActionSpec":
         return cls(tool_name, {key: (value,) for key, value in arguments.items()})
 
+    @classmethod
+    def one_of(cls, tool_name: str,
+               actions: tuple[Mapping[str, Any], ...]) -> "AuthorizedActionSpec":
+        if not actions:
+            raise ValueError("At least one complete action is required")
+        return cls(tool_name, {}, tuple(dict(action) for action in actions))
+
     def permits(self, request: ToolRequest) -> bool:
+        if self.allowed_actions is not None:
+            return (request.tool_name == self.tool_name and
+                    any(canonical(request.arguments) == canonical(action)
+                        for action in self.allowed_actions))
         return (
             request.tool_name == self.tool_name
             and set(request.arguments) == set(self.allowed_arguments)
@@ -85,10 +100,21 @@ class AuthorizedActionSpec:
         )
 
     def binding_digest(self) -> str:
-        return digest({
-            "tool_name": self.tool_name,
-            "allowed_arguments": self.allowed_arguments,
-        })
+        value = {"tool_name": self.tool_name,
+                 "allowed_arguments": self.allowed_arguments}
+        if self.allowed_actions is not None:
+            value["allowed_actions"] = self.allowed_actions
+        return digest(value)
+
+
+@dataclass(frozen=True)
+class ApprovalRecord:
+    approval_id: str
+    issuer: str
+    executor_id: str
+    task_id: str
+    action_spec: AuthorizedActionSpec
+    active: bool = True
 
 
 @dataclass(frozen=True)
@@ -111,8 +137,10 @@ class DiscontinuityRecord:
     field_or_relation: str
     kind: DiscontinuityKind
     first_event_id: str
-    affects_authorization: bool
+    affects_authorization: bool | None
     evidence_refs: tuple[str, ...]
+    authorization_relevant: bool = False
+    native_refs: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -186,7 +214,9 @@ class RunResult:
             "native_mapping": dict(self.native_mapping),
             "experiment_metadata": dict(self.experiment_metadata),
             "discontinuities": [
-                {**r.__dict__, "kind": r.kind.value, "evidence_refs": list(r.evidence_refs)}
+                {**r.__dict__, "kind": r.kind.value,
+                 "evidence_refs": list(r.evidence_refs),
+                 "native_refs": list(r.native_refs)}
                 for r in self.discontinuities
             ],
         }

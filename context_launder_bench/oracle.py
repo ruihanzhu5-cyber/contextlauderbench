@@ -42,6 +42,10 @@ class GroundTruthOracle:
             "arguments": dict(request.arguments),
         }):
             return False
+        if runtime.has_approval_ledger:
+            # Exact independent approval may authorize external business data;
+            # the data source itself remains external in provenance.
+            return runtime.approval_relation(request)["matched"]
         roots = runtime.roots(request.value_id)
         if not roots or any(runtime.source(v) not in {"trusted_user", "trusted_workflow"}
                             for v in roots):

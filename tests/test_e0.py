@@ -122,6 +122,31 @@ class E0GoldenTests(unittest.TestCase):
         self.assertEqual(outcome.admission_decision, Decision.DENY)
         self.assertFalse(outcome.committed)
 
+    def test_joint_action_spec_rejects_cross_combinations(self):
+        from context_launder_bench.model import AuthorizedActionSpec
+        from context_launder_bench.runtime import TrustedRuntime
+        runtime = TrustedRuntime("joint-actions", "cross_task")
+        spec = AuthorizedActionSpec.one_of("make_payment", (
+            {"account": "X", "amount": 100},
+            {"account": "Y", "amount": 250},
+        ))
+        old = AuthorizedActionSpec(
+            "make_payment", {"account": ("X", "Y"), "amount": (100, 250)})
+        context = runtime.begin_task("user-A", "T2", "main",
+                                     "execute-request", 1, ["make_payment"])
+        value = runtime.seed_value({}, "trusted_user", context)
+        for account, amount, expected in (
+            ("X", 100, True), ("Y", 250, True),
+            ("X", 250, False), ("Y", 100, False),
+        ):
+            request = runtime.make_request(
+                "make_payment", {"account": account, "amount": amount},
+                "executor-main", "cap-main", "terminal-callsite",
+                context, value.value_id,
+            )
+            self.assertIs(spec.permits(request), expected)
+            self.assertTrue(old.permits(request))
+
     def test_shared_ancestor_diamond_is_valid_provenance(self):
         from context_launder_bench.runtime import TrustedRuntime
         runtime = TrustedRuntime("diamond", "fork_join")

@@ -1,6 +1,6 @@
 # ContextLaunderBench
 
-ContextLaunderBench is a small authorization-context benchmark. E0–E3-mini use deterministic scripted calls; an opt-in LangGraph path can consume a supplied model backend. Tool effects remain in-memory mock records. E4 is paused.
+ContextLaunderBench is a small authorization-context benchmark. E0-E3-mini use deterministic scripted calls; 2A adds a deterministic LangGraph payment workflow with a local in-memory ledger. An opt-in LangGraph path can consume a supplied model backend. E4 is paused.
 
 ## Setup and tests
 
@@ -35,20 +35,33 @@ Then construct one scenario with `task_text` and a trusted `AuthorizedActionSpec
 
 `results.json` contains each run's attempt status, actual tool request, admission decision, commit state and post-hoc ground truth. `summary.json` retains scripted counts and adds tool-call/no-attempt/parse-error/provider-error counts and rates, plus unsafe commits divided by tool attempts. Ground truth and admission are null when there was no valid tool attempt. `admission_traces.csv` retains its original columns and adds `attempt_status`. Model `results.json` rows also include provider, model, explicit configuration, framework/scenario IDs, upstream/task/provider-prompt digests, response ID and finish reason when available. Full prompts and API keys are not written to reports. Provider failures are recorded without retrying or aborting the batch.
 
-E2's classifier uses runtime event witnesses, context IDs, actual policy decisions and native value mapping. It can label a dropped value or a changed value with no Derive witness. Normal current traces may contain none of those two categories; absence is not proof that every transformation is safe. The matrix is integration evidence, not a general LangGraph vulnerability claim.
+E2's classifier uses runtime event witnesses, context IDs, actual policy decisions and native value mapping. Schema v2 separates business-value continuity from authorization qualifiers. Missing evidence is `unobserved`, not confirmed loss; `dropped` and `transformed_without_witness` require boundary/value evidence. `authorization_relevant` is a schema property, while `affects_authorization=null` records that causal effect was not tested in the generic E2 trace. `AuthorizationSpecBound` witnesses the action specification, never an individual approval match. Existing `allowed_arguments` independent ranges remain valid for legacy uses; `AuthorizedActionSpec.one_of` adds joint action alternatives. Historical reports use the old E2 schema; regenerate them to use v2. Neither schema establishes a general LangGraph vulnerability.
 
 Version-by-version changes are recorded in [CHANGELOG.md](CHANGELOG.md). The GitHub Actions test workflow runs Python 3.11 with `requirements.lock` and the complete unittest suite. It needs no LLM API key. No real external LLM experiment has been run; start with one explicit case, then the four golden pairs after inspecting that case.
+
+## 2A deterministic payment workflow
+
+Run the controlled 2A suite locally:
+
+    .venv/Scripts/python -m context_launder_bench.workflow2a --output reports/workflow2a
+
+This runs 12 controlled cases through real LangGraph invoice and approval branches, a graph join, a scripted executor that reads the joined state, D0 -D3 admission, and an in-memory payment ledger. The approval ledger binds approval ID, issuer authority, executor, task, exact action, active status and the request's joined approval reference, including evidence that the selected record came from the trusted approval branch. Business arguments remain only `account` and `amount`; an external invoice can be legal when independently and exactly approved.
+
+The terminal legal/wrong-approval pair submits the same X/100 payment under different approvals. The explicit `misbind` and `drop` transforms occur at the graph join; repair restores the binding with the same inputs, approval ledger, policy and executor rule. Identity transport is a sequential control. A commit debits the local treasury, credits X or Y, and emits a receipt plus state diff; a rejection leaves balances unchanged. Each attempted call has a precommit authorization snapshot with ledger version and request digest. The report separates approval-reference continuity, exact action binding, full approval-relation match and whether admission checked approval. The run is single-threaded and deterministic. These cases test mechanisms, not independent samples or natural LLM failure rates.
+
+Outputs are `workflow2a_results.json`, `workflow2a_summary.json` and `workflow2a_matrix.md`. The 2A report has its own schema version and does not change scripted E0 -E3 counts. The workflow does not test real checkpoint restoration, multilevel delegation, concurrent approval revocation, distributed transactions or external business effects. No external LLM has been used for 2A; 2B would replace the scripted executor's joined-state decision with an explicitly configured model backend, first on one case and then the four golden pairs after inspecting its result. External API use requires a separate request.
 
 ## Module map
 
 - `model.py`: scenario, trusted action rule, request, event and result types.
-- `runtime.py`: trusted contexts, values, provenance DAG, endorsements, capabilities and event log.
+- `runtime.py`: trusted contexts, values, provenance DAG, endorsements, capabilities, approval ledger and event log.
 - `oracle.py`: read-only Boolean ground-truth judgment.
 - `policies.py`: D0–D3 admission policies and E0-only enforcing fixture.
-- `endpoint.py`: sole mock effect writer under the selected admission policy.
+- `endpoint.py`: sole admitted effect writer; optional local payment ledger callback returns a receipt.
 - `backends.py`: unified `AgentInput -> ToolAttempt`, scripted backend and generic model parser.
 - `llm/deepseek.py`: provider request/response adapter, config and optional HTTP transport.
 - `adapters/langgraph_adapter.py`: native message/state transport, branch/join and agent node.
+- `workflow2a.py`: deterministic payment branches, join, approval relation probe and local ledger.
 - `analysis.py`, `benchmark.py`, `generator.py`: discontinuities, reporting and scripted case generation.
 
-The threat model covers agent-controlled data, not arbitrary Python process compromise. There is one agent framework, no real tool side effect and no E4 defense.
+The threat model covers agent-controlled data, not arbitrary Python process compromise. There is one agent framework, no external business effect and no E4 defense.

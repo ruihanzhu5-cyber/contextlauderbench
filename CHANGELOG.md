@@ -1,6 +1,14 @@
 # Change log
 
-Each entry describes a repository version. The linked Git commits contain the exact file-level diff. Add an entry when publishing the next version.
+Each published entry is part of a Git commit whose diff records the exact file-level changes.
+
+## 2026-09-25: Measurement semantics and 2A deterministic workflow
+
+- E2 schema v2 distinguishes missing observation evidence from confirmed value loss, separates business-value lineage from authorization qualifiers, records native/evidence refs, and leaves generic authorization causality unknown.
+- Separated trusted action-spec evidence from per-request approval binding; added complete joint action alternatives while retaining independent legacy argument ranges.
+- Added a trusted structured approval ledger with issuer resource authority, exact executor/task/action and active-state checks. The oracle reads a unified request-to-approval relation; external invoice input can be legal with independent exact approval.
+- Added real LangGraph invoice and approval branches, join-boundary fault/repair and identity controls, a scripted executor that consumes joined state, and a local payment ledger written only through the endpoint. Precommit authorization snapshots, receipts and state diffs link decisions to effects.
+- Added 12 controlled 2A conditions and targeted tests. No external LLM API, external business effect, E4 work, deployment, or natural LLM failure-rate claim.
 
 ## 2026-09-25: LLM pilot preparation
 

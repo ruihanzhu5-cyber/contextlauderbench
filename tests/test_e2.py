@@ -25,8 +25,10 @@ class E2BoundaryTests(unittest.TestCase):
                       if records[field] is DiscontinuityKind.PRESERVED_AND_ENFORCED}
             self.assertEqual(actual, enforced)
             self.assertIs(records["source"],
-                          DiscontinuityKind.PRESENT_BUT_UNENFORCED)
+                          DiscontinuityKind.UNOBSERVED)
             self.assertIs(records["approval_binding"],
+                          DiscontinuityKind.UNOBSERVED)
+            self.assertIs(records["action_spec"],
                           DiscontinuityKind.PRESENT_BUT_UNENFORCED)
 
     def test_drop_and_unwitnessed_transform_need_value_evidence(self):
@@ -53,13 +55,14 @@ class E2BoundaryTests(unittest.TestCase):
             attempt_status="no_attempt",
         )
         records = classify_result(result)
-        lineages = [r.kind for r in records if r.field_or_relation == "value_lineage"]
+        lineages = [r.kind for r in records if r.field_or_relation == "business_value"]
         self.assertEqual(lineages, [
             DiscontinuityKind.DROPPED,
             DiscontinuityKind.TRANSFORMED_WITHOUT_WITNESS,
+            DiscontinuityKind.PRESERVED,
         ])
         self.assertTrue(all(
-            r.kind is DiscontinuityKind.UNREPRESENTED
+            r.kind is DiscontinuityKind.UNOBSERVED
             for r in records if r.boundary == "synthetic"
             and r.field_or_relation == "source"
         ))
@@ -73,8 +76,17 @@ class E2BoundaryTests(unittest.TestCase):
         endpoint_records = [r for result in results for r in result.discontinuities
                             if r.boundary == "endpoint"]
         self.assertTrue(endpoint_records)
-        self.assertTrue(all(r.kind is DiscontinuityKind.PRESENT_BUT_UNENFORCED
+        self.assertTrue(any(r.kind is DiscontinuityKind.UNOBSERVED
                             for r in endpoint_records))
+        self.assertTrue(all(r.affects_authorization is None
+                            for result in results
+                            for r in result.discontinuities))
+        self.assertTrue(all(r.authorization_relevant
+                            for r in endpoint_records
+                            if r.field_or_relation == "approval_binding"))
+        self.assertTrue(all(not r.authorization_relevant
+                            for r in endpoint_records
+                            if r.field_or_relation == "business_value"))
         for result in results:
             event_ids = {e.event_id for e in result.events}
             for record in result.discontinuities:
@@ -89,9 +101,32 @@ class E2BoundaryTests(unittest.TestCase):
             markdown = paths[2].read_text(encoding="utf-8")
             table = [line for line in markdown.splitlines() if line.startswith("|")]
             self.assertGreater(len(table), 2)
-            self.assertIn("Value lineage", table[0])
+            self.assertIn("Business value", table[0])
+            self.assertIn("Action spec", table[0])
             widths = [len(line.strip("|").split("|")) for line in table]
             self.assertTrue(all(width == widths[0] for width in widths), widths)
+
+
+    def test_missing_evidence_is_unobserved_not_confirmed_loss(self):
+        from context_launder_bench.runtime import TrustedRuntime
+        runtime = TrustedRuntime("e2-unknown", "sibling")
+        runtime.observe_boundary(
+            "unknown", "missing-before", None,
+            represented_fields=("approval_binding",),
+            enforced_fields=("approval_binding",),
+        )
+        result = RunResult(
+            "e2-unknown", "test", "D0", None, False, "NO_ATTEMPT", None,
+            runtime.events, runtime.canonical_log_digest(),
+            attempt_status="no_attempt",
+        )
+        records = {r.field_or_relation: r for r in classify_result(result)}
+        self.assertIs(records["approval_binding"].kind,
+                      DiscontinuityKind.UNOBSERVED)
+        self.assertIs(records["business_value"].kind,
+                      DiscontinuityKind.UNOBSERVED)
+        self.assertIsNone(records["approval_binding"].affects_authorization)
+        self.assertTrue(records["approval_binding"].authorization_relevant)
 
 
 if __name__ == "__main__":
