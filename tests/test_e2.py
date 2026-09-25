@@ -55,7 +55,7 @@ class E2BoundaryTests(unittest.TestCase):
             attempt_status="no_attempt",
         )
         records = classify_result(result)
-        lineages = [r.kind for r in records if r.field_or_relation == "business_value"]
+        lineages = [r.kind for r in records if r.field_or_relation == "value_lineage"]
         self.assertEqual(lineages, [
             DiscontinuityKind.DROPPED,
             DiscontinuityKind.TRANSFORMED_WITHOUT_WITNESS,
@@ -86,7 +86,7 @@ class E2BoundaryTests(unittest.TestCase):
                             if r.field_or_relation == "approval_binding"))
         self.assertTrue(all(not r.authorization_relevant
                             for r in endpoint_records
-                            if r.field_or_relation == "business_value"))
+                            if r.field_or_relation == "value_lineage"))
         for result in results:
             event_ids = {e.event_id for e in result.events}
             for record in result.discontinuities:
@@ -101,7 +101,7 @@ class E2BoundaryTests(unittest.TestCase):
             markdown = paths[2].read_text(encoding="utf-8")
             table = [line for line in markdown.splitlines() if line.startswith("|")]
             self.assertGreater(len(table), 2)
-            self.assertIn("Business value", table[0])
+            self.assertIn("Value lineage", table[0])
             self.assertIn("Action spec", table[0])
             widths = [len(line.strip("|").split("|")) for line in table]
             self.assertTrue(all(width == widths[0] for width in widths), widths)
@@ -123,7 +123,7 @@ class E2BoundaryTests(unittest.TestCase):
         records = {r.field_or_relation: r for r in classify_result(result)}
         self.assertIs(records["approval_binding"].kind,
                       DiscontinuityKind.UNOBSERVED)
-        self.assertIs(records["business_value"].kind,
+        self.assertIs(records["value_lineage"].kind,
                       DiscontinuityKind.UNOBSERVED)
         self.assertIsNone(records["approval_binding"].affects_authorization)
         self.assertTrue(records["approval_binding"].authorization_relevant)

@@ -140,7 +140,7 @@ def classify_result(result: RunResult) -> tuple[DiscontinuityRecord, ...]:
             value_evidence.extend(path)
         records.append(DiscontinuityRecord(
             result.scenario_id, result.framework, boundary, before, after,
-            "business_value", value_kind, boundary_event.event_id, None,
+            "value_lineage", value_kind, boundary_event.event_id, None,
             tuple(dict.fromkeys(value_evidence)),
             authorization_relevant=False, native_refs=native,
         ))
@@ -179,11 +179,11 @@ def export_boundaries(results, output_dir):
         matrix.setdefault(key, {})[row["field_or_relation"]] = row["kind"]
         evidence.setdefault(key, []).extend(row["evidence_refs"])
     lines = [
-        "# Boundary matrix (schema v2)", "",
+        "# Boundary matrix (schema v3)", "",
         "Unobserved means evidence is absent, not that a qualifier was lost. "
-        "Business value lineage is separate from authorization qualifiers. "
+        "Value lineage is separate from authorization qualifiers. "
         "Trace IDs resolve in results.json.", "",
-        "| Framework | Run | Boundary | Source | Task | Branch | Purpose | Epoch | Approval binding | Action spec | Business value | Enforcement | Trace evidence |",
+        "| Framework | Run | Boundary | Source | Task | Branch | Purpose | Epoch | Approval binding | Action spec | Value lineage | Enforcement | Trace evidence |",
         "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for key, values in sorted(matrix.items()):
@@ -200,7 +200,7 @@ def export_boundaries(results, output_dir):
         lines.append("| " + " | ".join(
             [framework, run_id, boundary] + cells +
             [values.get("action_spec", DiscontinuityKind.UNOBSERVED.value),
-             values.get("business_value", DiscontinuityKind.UNOBSERVED.value),
+             values.get("value_lineage", DiscontinuityKind.UNOBSERVED.value),
              enforcement, refs]) + " |")
     mpath.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return jpath, cpath, mpath

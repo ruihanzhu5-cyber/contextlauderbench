@@ -2,6 +2,14 @@
 
 Each published entry is part of a Git commit whose diff records the exact file-level changes.
 
+## 2026-09-25: Offline payment backend wiring
+
+- Add explicit backend injection to the payment workflow and isolate model input from pre-join audit state.
+- Preserve attempt categories and provider metadata; record expected effect failures independently of admission and continue batches.
+- Guard malformed resource types in the approval relation and preserve model-selected business calls.
+- Rename E2 business_value to value_lineage (schema v3), and version the extended payment report as schema v2.
+- Add recording-backend and DeepSeek fake-client regressions. No external LLM API was called.
+
 ## 2026-09-25: Measurement semantics and 2A deterministic workflow
 
 - E2 schema v2 distinguishes missing observation evidence from confirmed value loss, separates business-value lineage from authorization qualifiers, records native/evidence refs, and leaves generic authorization causality unknown.
