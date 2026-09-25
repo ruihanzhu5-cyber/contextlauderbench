@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Mapping
 
-from .backends import ScriptedBackend
+from .backends import ScriptedBackend, ToolAttempt
 from .endpoint import UnifiedMockEndpoint
-from .model import Decision, RunResult, Scenario, digest
+from .model import RunResult, Scenario, canonical, digest
 from .oracle import GroundTruthOracle
 from .policies import AdmissionPolicy, GroundTruthEnforcingPolicy, policy_from_id
 from .runtime import TrustedRuntime
@@ -20,19 +20,23 @@ class ExecutionState:
     native_mapping: dict[str, str] = field(default_factory=dict)
 
 
-def prepare_scenario(scenario: Scenario, policy_id: str = "D0") -> ExecutionState:
-    return _prepare_scenario(scenario, policy_from_id(policy_id))
+def prepare_scenario(scenario: Scenario, policy_id: str = "D0",
+                     source_payload: Any = None) -> ExecutionState:
+    return _prepare_scenario(scenario, policy_from_id(policy_id), source_payload)
 
 
 def prepare_e0_scenario(scenario: Scenario) -> ExecutionState:
     return _prepare_scenario(scenario, GroundTruthEnforcingPolicy())
 
 
-def _prepare_scenario(scenario: Scenario, admission_policy: AdmissionPolicy) -> ExecutionState:
+def _prepare_scenario(scenario: Scenario, admission_policy: AdmissionPolicy,
+                      source_payload: Any = None) -> ExecutionState:
     runtime = TrustedRuntime(scenario.scenario_id, scenario.family)
     endpoint = UnifiedMockEndpoint(runtime, admission_policy)
     runtime.grant_capability(scenario.capability_id, scenario.executor_id, [scenario.tool_name])
     action = digest({"tool": scenario.tool_name, "arguments": scenario.arguments})
+    payload = dict(scenario.arguments) if source_payload is None else source_payload
+    model_mode = source_payload is not None
     context_ref = runtime.begin_task("user-A", "T2", "main", "execute-request",
                                      1, [scenario.tool_name])
     if scenario.family == "sibling":
@@ -40,12 +44,14 @@ def _prepare_scenario(scenario: Scenario, admission_policy: AdmissionPolicy) -> 
         source_ref = runtime.begin_task("user-A", "T2", "reader-branch",
                                         "read-target", 1, [scenario.tool_name])
         source = "trusted_user" if scenario.legal else "untrusted_reader"
-        env = runtime.seed_value(dict(scenario.arguments), source, source_ref)
+        env = runtime.seed_value(payload, source, source_ref)
         value_id = env.value_id
+        if model_mode and scenario.legal:
+            runtime.endorse("user-A", action, "T2", "sibling_model", 1)
     elif scenario.family == "cross_task":
         old_ref = runtime.begin_task("user-A", "T1", "prior", "old-task", 1,
                                      [scenario.tool_name])
-        env = runtime.seed_value(dict(scenario.arguments), "trusted_workflow", context_ref)
+        env = runtime.seed_value(payload, "trusted_workflow", context_ref)
         value_id = env.value_id
         approval_task = "T2" if scenario.legal else "T1"
         runtime.endorse("user-A", action, approval_task, "cross_task", 1)
@@ -54,7 +60,7 @@ def _prepare_scenario(scenario: Scenario, admission_policy: AdmissionPolicy) -> 
         runtime.observe_boundary("task-switch", value_id, value_id,
                                  represented_fields=("task",))
     elif scenario.family == "cross_epoch":
-        env = runtime.seed_value(dict(scenario.arguments), "trusted_user", context_ref)
+        env = runtime.seed_value(payload, "trusted_user", context_ref)
         runtime.memory_write("target", env.value_id)
         runtime.endorse("user-A", action, "T2", "cross_epoch", 1)
         runtime.revoke("cross_epoch")
@@ -71,11 +77,12 @@ def _prepare_scenario(scenario: Scenario, admission_policy: AdmissionPolicy) -> 
                                    [scenario.tool_name])
         b_ref = runtime.begin_task("user-A", "T2", "branch-B", "approval", 1,
                                    [scenario.tool_name])
-        target = runtime.seed_value(scenario.arguments.get("account"),
+        target_payload = payload.get("account") if isinstance(payload, Mapping) else payload
+        target = runtime.seed_value(target_payload,
                                     "trusted_workflow", a_ref)
         marker = runtime.seed_value("approval-marker", "trusted_workflow", b_ref)
         value_id = runtime.join("main", (target.value_id, marker.value_id),
-                                dict(scenario.arguments), context_ref).value_id
+                                payload, context_ref).value_id
         binding = action if scenario.legal else digest({"scope": "general-payment"})
         runtime.endorse("user-A", binding, "T2", "fork_join", 1)
     else:
@@ -103,39 +110,87 @@ def apply_channel(state: ExecutionState, scenario: Scenario) -> None:
 
 
 def finish_scenario(scenario: Scenario, state: ExecutionState,
-                    framework: str, native_mapping: dict[str, str] | None = None) -> RunResult:
-    intent = ScriptedBackend().run(scenario)
-    # All self-declared fields are inert text, even when they resemble trusted metadata.
+                    framework: str, native_mapping: dict[str, str] | None = None,
+                    attempt: ToolAttempt | None = None,
+                    observed_payload: Any = None) -> RunResult:
+    model_mode = attempt is not None
+    intent = attempt if attempt is not None else ScriptedBackend().run(scenario)
+    # Self-declared metadata stays inert text, outside trusted runtime facts.
     if intent.self_declared_metadata:
         state.runtime.event("AgentText", payload_digest=digest(intent.self_declared_metadata))
-    request = state.runtime.make_request(
-        scenario.tool_name, intent.arguments, scenario.executor_id,
-        scenario.capability_id, scenario.callsite_id, state.context_ref, state.value_id
-    )
-    outcome = state.endpoint.invoke(request)
-    ground_truth_authorized = GroundTruthOracle().authorized(state.runtime, request)
+    if intent.status not in {"tool_call", "no_attempt", "parse_error"}:
+        raise ValueError(f"Unknown agent status: {intent.status}")
+
+    if model_mode:
+        if observed_payload is None:
+            raise ValueError("Model path requires actual observed payload")
+        source = state.runtime.value(state.value_id)
+        if source is None:
+            raise ValueError("Missing runtime value for model input")
+        if canonical(source.payload) != canonical(observed_payload):
+            state.value_id = state.runtime.derive(
+                (state.value_id,), observed_payload, "transport-output",
+                state.context_ref,
+            ).value_id
+
+    outcome = None
+    request = None
+    ground_truth_authorized = None
+    if intent.status == "tool_call":
+        assert intent.tool_name is not None and intent.arguments is not None
+        if model_mode:
+            state.value_id = state.runtime.derive(
+                (state.value_id,),
+                {"tool_name": intent.tool_name, "arguments": dict(intent.arguments)},
+                "model-tool-call", state.context_ref,
+            ).value_id
+        request = state.runtime.make_request(
+            intent.tool_name, intent.arguments, scenario.executor_id,
+            scenario.capability_id, scenario.callsite_id, state.context_ref,
+            state.value_id,
+        )
+        outcome = state.endpoint.invoke(request)
+        ground_truth_authorized = GroundTruthOracle().authorized(state.runtime, request)
+    elif intent.status == "no_attempt":
+        state.runtime.event("NoAttempt")
+    else:
+        state.runtime.event("ParseError", reason_code=intent.error or "invalid_tool_call")
+
+    committed = outcome.committed if outcome else False
     state.runtime.event(
         "OutcomeEvaluated",
         ground_truth_authorized=ground_truth_authorized,
-        unsafe_commit=outcome.committed and not ground_truth_authorized,
+        unsafe_commit=committed and ground_truth_authorized is False,
     )
-    if outcome.committed:
-        endorsement = state.runtime.valid_endorsement(
-            request, state.runtime.scenario_family
-        )
+    if committed and request is not None:
+        scope = ("sibling_model" if model_mode and
+                 state.runtime.scenario_family == "sibling"
+                 else state.runtime.scenario_family)
+        endorsement = state.runtime.valid_endorsement(request, scope)
         if endorsement is not None:
             state.runtime.consume_endorsement(endorsement.nonce)
     from .analysis import classify_result
+    if request is None:
+        terminal_signature = ()
+    else:
+        terminal_signature = (
+            request.tool_name, canonical(request.arguments), request.executor_id,
+            request.capability_id, request.callsite_id,
+            scenario.framework_configuration, scenario.scheduler_template,
+        )
     result = RunResult(
-        scenario.scenario_id, framework, outcome.admission_policy,
-        outcome.admission_decision, outcome.committed, outcome.reason_code,
+        scenario.scenario_id, framework, state.endpoint.admission_policy_id,
+        outcome.admission_decision if outcome else None, committed,
+        outcome.reason_code if outcome else intent.status.upper(),
         ground_truth_authorized, state.runtime.events,
         state.runtime.canonical_log_digest(), native_mapping or {},
-        terminal_signature=scenario.terminal_signature()
+        terminal_signature=terminal_signature,
+        attempt_status=intent.status,
+        tool_name=request.tool_name if request else None,
+        tool_arguments=request.arguments if request else None,
     )
     from dataclasses import replace
     return replace(result, discontinuities=classify_result(result))
-
 
 def run_free(scenario: Scenario, policy_id: str = "D0") -> RunResult:
     state = prepare_scenario(scenario, policy_id)

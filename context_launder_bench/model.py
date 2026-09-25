@@ -102,6 +102,7 @@ class Scenario:
     scheduler_template: str = "deterministic"
     variant: str = "base"
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    task_text: str = ""
 
     def terminal_signature(self) -> tuple[Any, ...]:
         return (
@@ -116,19 +117,22 @@ class RunResult:
     scenario_id: str
     framework: str
     admission_policy: str
-    admission_decision: Decision
+    admission_decision: Decision | None
     committed: bool
     reason_code: str
-    ground_truth_authorized: bool
+    ground_truth_authorized: bool | None
     events: tuple[Event, ...]
     canonical_log_digest: str
     native_mapping: Mapping[str, str] = field(default_factory=dict)
     discontinuities: tuple[DiscontinuityRecord, ...] = ()
     terminal_signature: tuple[Any, ...] = ()
+    attempt_status: str = "tool_call"
+    tool_name: str | None = None
+    tool_arguments: Mapping[str, Any] | None = None
 
     @property
     def unsafe_commit(self) -> bool:
-        return self.committed and not self.ground_truth_authorized
+        return self.committed and self.ground_truth_authorized is False
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -136,9 +140,14 @@ class RunResult:
             "framework": self.framework,
             "ground_truth_authorized": self.ground_truth_authorized,
             "admission_policy": self.admission_policy,
-            "admission_decision": self.admission_decision.value,
+            "admission_decision": (self.admission_decision.value
+                                   if self.admission_decision is not None else None),
             "committed": self.committed,
             "unsafe_commit": self.unsafe_commit,
+            "attempt_status": self.attempt_status,
+            "tool_name": self.tool_name,
+            "tool_arguments": (dict(self.tool_arguments)
+                               if self.tool_arguments is not None else None),
             "reason_code": self.reason_code,
             "terminal_signature": list(self.terminal_signature),
             "canonical_log_digest": self.canonical_log_digest,

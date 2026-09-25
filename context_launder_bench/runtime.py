@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 
@@ -32,6 +33,7 @@ class TrustedRuntime:
         self.__values: dict[str, BusinessValue] = {}
         self.__envelopes: dict[str, RuntimeEnvelope] = {}
         self.__parents: dict[str, tuple[str, ...]] = {}
+        self.__transforms: dict[str, str | None] = {}
         self.__witnesses: dict[str, str] = {}
         self.__sources: dict[str, str] = {}
         self.__endorsements: list[Endorsement] = []
@@ -99,13 +101,14 @@ class TrustedRuntime:
             raise ValueError("Unknown trusted context")
         self.__value_counter += 1
         value_id = f"v{self.__value_counter:04d}"
-        value = BusinessValue(value_id, payload)
+        value = BusinessValue(value_id, deepcopy(payload))
         self.__values[value_id] = value
         self.__sources[value_id] = source
-        read = self.event("Read", source=source, value_id=value_id, payload_digest=digest(payload))
+        read = self.event("Read", source=source, value_id=value_id, payload_digest=digest(value.payload))
         env = RuntimeEnvelope(value_id, context_ref, read.event_id)
         self.__envelopes[value_id] = env
         self.__parents[value_id] = ()
+        self.__transforms[value_id] = None
         self.__witnesses[value_id] = read.event_id
         return env
 
@@ -118,12 +121,14 @@ class TrustedRuntime:
             raise ValueError("Unknown trusted context")
         self.__value_counter += 1
         value_id = f"v{self.__value_counter:04d}"
-        self.__values[value_id] = BusinessValue(value_id, payload)
+        self.__values[value_id] = BusinessValue(value_id, deepcopy(payload))
         event = self.event("Derive", output_id=value_id, input_ids=parents,
-                           transform_id=transform_id, payload_digest=digest(payload))
+                           transform_id=transform_id,
+                           payload_digest=digest(self.__values[value_id].payload))
         env = RuntimeEnvelope(value_id, context_ref, event.event_id)
         self.__envelopes[value_id] = env
         self.__parents[value_id] = parents
+        self.__transforms[value_id] = transform_id
         self.__witnesses[value_id] = event.event_id
         return env
 
@@ -199,7 +204,8 @@ class TrustedRuntime:
             raise ValueError("Unknown value")
 
     def value(self, value_id: str) -> BusinessValue | None:
-        return self.__values.get(value_id)
+        value = self.__values.get(value_id)
+        return BusinessValue(value.value_id, deepcopy(value.payload)) if value else None
 
     def envelope(self, value_id: str) -> RuntimeEnvelope | None:
         return self.__envelopes.get(value_id)
@@ -211,7 +217,10 @@ class TrustedRuntime:
                 return False
             seen.add(v)
             witness = self.__witnesses.get(v)
-            if witness is None or not any(e.event_id == witness for e in self.__events):
+            matching = next((e for e in self.__events if e.event_id == witness), None)
+            if matching is None:
+                return False
+            if dict(matching.data).get("payload_digest") != digest(self.__values[v].payload):
                 return False
             parents = self.__parents[v]
             if parents and not any(e.kind == "Derive" and
@@ -240,10 +249,20 @@ class TrustedRuntime:
     def parents(self, value_id: str) -> tuple[str, ...] | None:
         return self.__parents.get(value_id)
 
+    def transform(self, value_id: str) -> str | None:
+        return self.__transforms.get(value_id)
+
+    def has_join_ancestor(self, value_id: str) -> bool:
+        if self.__transforms.get(value_id) == "join":
+            return len(self.__parents.get(value_id, ())) == 2
+        return any(self.has_join_ancestor(parent)
+                   for parent in self.__parents.get(value_id, ()))
+
+
     def make_request(self, tool_name: str, arguments: Mapping[str, Any],
                      executor_id: str, capability_id: str, callsite_id: str,
                      context_ref: str, value_id: str) -> ToolRequest:
-        return ToolRequest(tool_name, dict(arguments), executor_id, capability_id,
+        return ToolRequest(tool_name, deepcopy(dict(arguments)), executor_id, capability_id,
                            callsite_id, context_ref, value_id)
 
     def _corrupt_provenance_for_test(self, value_id: str) -> None:
