@@ -212,7 +212,8 @@ class TrustedRuntime:
                     record.action_spec.tool_name, frozenset()
                 ))) if record else (),
             "issuer_authorized": bool(
-                record and request.arguments.get("account") in
+                record and isinstance(request.arguments.get("account"), str)
+                and request.arguments.get("account") in
                 self.__issuer_authority.get(record.issuer, {}).get(
                     record.action_spec.tool_name, frozenset())),
             "executor_match": bool(record and

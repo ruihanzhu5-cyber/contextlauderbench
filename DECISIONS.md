@@ -41,3 +41,13 @@ The 2A LangGraph graph has invoice and approval branches and a real join. A cont
 ## D13: Scope of paired 2A claims and 2B boundary
 
 The same-request legal/wrong-approval pair can establish whether D0-D3 admission distinguishes approval history; it cannot measure natural LLM behavior. The fault/repair pair can establish a proposal difference under the same scripted executor rule, input and ledger. It cannot claim that restoring a qualifier makes D0-D3 reject a forced call. The 12 conditions are mechanism coverage. 2B would replace the scripted executor with a model over joined native state, retain approval/oracle/admission/effect separation, and begin with one explicitly configured case. No external API call is part of 2A.
+
+## Payment backend wiring before live 2B
+
+- Inject the backend into the existing payment graph instead of routing the new experiment through the legacy scenario adapter.
+- Expose only a deep-copied joined view. Keep pre-boundary state for audit without making it another model input channel.
+- Preserve model-selected tool/arguments and the harness-selected approval reference separately. The backend does not mint authority.
+- Keep provider_error, parse_error and no_attempt distinct, preserve provider metadata, and never retry implicitly.
+- Recover only declared pre-mutation effect failures; an ALLOW followed by execution_error is not DENY or ToolCommit. Unknown partial-effect failures propagate.
+- Rename generic E2 business_value to value_lineage (schema v3); witnessed derivation does not establish content preservation.
+- Require explicit case selection for injected-backend suites and do not infer natural failure rates or causal verification from a single model pair.

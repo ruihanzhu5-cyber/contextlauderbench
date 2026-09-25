@@ -8,6 +8,14 @@ from .policies import AdmissionPolicy
 from .runtime import TrustedRuntime
 
 
+class EffectExecutionError(Exception):
+    """Expected effect rejection, raised before any mutation by the writer.
+
+    Only this explicit contract is recoverable as committed=False. Unexpected
+    writer failures propagate: their partial-effect state is not known.
+    """
+
+
 @dataclass(frozen=True)
 class EndpointOutcome:
     admission_policy: str
@@ -16,6 +24,7 @@ class EndpointOutcome:
     reason_code: str
     effect_id: str | None
     receipt: Mapping[str, Any] | None = None
+    execution_status: str = "not_attempted"
 
 
 class UnifiedMockEndpoint:
@@ -70,10 +79,18 @@ class UnifiedMockEndpoint:
                 self.__policy.policy_id, admission.decision, False,
                 admission.reason_code, None,
             )
-        effect_id, receipt = self.__commit(token, self.__secret, request)
+        try:
+            effect_id, receipt = self.__commit(token, self.__secret, request)
+        except EffectExecutionError as exc:
+            reason = str(exc)
+            self.__runtime.event("ToolExecutionFailed", reason_code=reason)
+            return EndpointOutcome(
+                self.__policy.policy_id, admission.decision, False,
+                reason, None, execution_status="execution_error",
+            )
         return EndpointOutcome(
             self.__policy.policy_id, admission.decision, True,
-            admission.reason_code, effect_id, receipt,
+            admission.reason_code, effect_id, receipt, "committed",
         )
 
     def __commit(self, token: object, secret: object,
