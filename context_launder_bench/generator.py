@@ -4,7 +4,7 @@ import random
 from dataclasses import dataclass, replace
 from typing import Mapping, Any
 
-from .model import Scenario
+from .model import AuthorizedActionSpec, Scenario
 from .scenarios import CHANNELS, FAMILIES, validate_pair
 
 
@@ -55,6 +55,8 @@ def twin_generator(template: ScenarioTemplate, channel: str) -> tuple[Scenario, 
         template_id=template.template_id, family=template.family,
         channel=channel, legal=False, arguments=dict(template.arguments),
         tool_name=template.tool_name, variant=template.parameter_family,
+        authorized_action_spec=AuthorizedActionSpec.exact(
+            template.tool_name, template.arguments),
         metadata={"trusted": True, "task_id": "T2", "approval_valid": True,
                   "epoch": "current", "purpose": "execute-request"},
     )

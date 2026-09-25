@@ -63,6 +63,35 @@ class ToolRequest:
 
 
 @dataclass(frozen=True)
+class AuthorizedActionSpec:
+    """Trusted rule for real tool requests, independent of scripted arguments."""
+
+    tool_name: str
+    allowed_arguments: Mapping[str, tuple[Any, ...]]
+
+    @classmethod
+    def exact(cls, tool_name: str, arguments: Mapping[str, Any]) -> "AuthorizedActionSpec":
+        return cls(tool_name, {key: (value,) for key, value in arguments.items()})
+
+    def permits(self, request: ToolRequest) -> bool:
+        return (
+            request.tool_name == self.tool_name
+            and set(request.arguments) == set(self.allowed_arguments)
+            and all(
+                any(canonical(request.arguments[key]) == canonical(allowed)
+                    for allowed in choices)
+                for key, choices in self.allowed_arguments.items()
+            )
+        )
+
+    def binding_digest(self) -> str:
+        return digest({
+            "tool_name": self.tool_name,
+            "allowed_arguments": self.allowed_arguments,
+        })
+
+
+@dataclass(frozen=True)
 class Event:
     event_id: str
     kind: str
@@ -103,6 +132,7 @@ class Scenario:
     variant: str = "base"
     metadata: Mapping[str, Any] = field(default_factory=dict)
     task_text: str = ""
+    authorized_action_spec: AuthorizedActionSpec | None = None
 
     def terminal_signature(self) -> tuple[Any, ...]:
         return (

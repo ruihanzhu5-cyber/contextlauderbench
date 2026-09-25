@@ -9,7 +9,7 @@ from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph, add_messages
 
-from ..backends import ModelBackend, ToolAttempt
+from ..backends import AgentBackend, AgentInput, ToolAttempt
 from ..model import RunResult, Scenario, canonical, digest
 from ..runner import finish_scenario, prepare_scenario
 
@@ -21,13 +21,17 @@ class GraphState(TypedDict, total=False):
     task: str
     pieces: Annotated[list[str], operator.add]
     attempt: dict[str, Any]
+    memory_value_id: str
+    join_value_id: str
+    branch_a_value_id: str
+    branch_b_value_id: str
 
 
 class LangGraphAdapter:
     """Native graph transport; all security facts remain in TrustedRuntime."""
 
     def run(self, scenario: Scenario, policy_id: str = "D0",
-            backend: ModelBackend | None = None,
+            backend: AgentBackend | None = None,
             upstream_output: Any = None) -> RunResult:
         model_mode = backend is not None
         if model_mode and (not scenario.task_text or upstream_output is None):
@@ -35,6 +39,7 @@ class LangGraphAdapter:
         state = prepare_scenario(
             scenario, policy_id,
             source_payload=upstream_output if model_mode else None,
+            defer_fork_join=scenario.family == "fork_join",
         )
         mapping: dict[str, str] = {}
         builder = StateGraph(GraphState)
@@ -85,7 +90,11 @@ class LangGraphAdapter:
                 state.runtime.memory_write("langgraph-state", value_id)
                 restored_id = state.runtime.memory_read("langgraph-state")
                 mapping["shared-state"] = restored_id
-                return {"value_id": restored_id, "payload": graph_state["payload"]}
+                return {
+                    "value_id": restored_id,
+                    "memory_value_id": restored_id,
+                    "payload": graph_state["payload"],
+                }
 
             builder.add_node("source", source)
             builder.add_node("memory", memory)
@@ -93,33 +102,83 @@ class LangGraphAdapter:
             builder.add_edge("source", "memory")
             tail = "memory"
         elif scenario.channel == "SPLIT_TRANSFORM_JOIN":
+            if scenario.family == "fork_join":
+                tail = START
+            else:
+                def branch_a(graph_state: GraphState) -> GraphState:
+                    return {"pieces": ["target"]}
+
+                def branch_b(graph_state: GraphState) -> GraphState:
+                    return {"pieces": ["authority"]}
+
+                def join(graph_state: GraphState) -> GraphState:
+                    assert set(graph_state["pieces"]) == {"target", "authority"}
+                    mapping["join-state"] = graph_state["value_id"]
+                    return {
+                        "payload": graph_state["payload"],
+                        "join_value_id": graph_state["value_id"],
+                    }
+
+                builder.add_node("branch_a", branch_a)
+                builder.add_node("branch_b", branch_b)
+                builder.add_node("join", join)
+                builder.add_edge(START, "branch_a")
+                builder.add_edge(START, "branch_b")
+                builder.add_edge(["branch_a", "branch_b"], "join")
+                tail = "join"
+        else:
+            raise ValueError(f"Unknown channel {scenario.channel}")
+
+        if scenario.family == "fork_join":
+            parent = tail
+
             def branch_a(graph_state: GraphState) -> GraphState:
-                return {"pieces": ["target"]}
+                payload = graph_state["payload"]
+                target = payload.get("account") if isinstance(payload, dict) else payload
+                value_id = state.runtime.derive(
+                    (graph_state["value_id"],), target,
+                    "langgraph-branch-A", state.branch_contexts["A"],
+                ).value_id
+                mapping["branch-A"] = value_id
+                return {"pieces": ["target"], "branch_a_value_id": value_id}
 
             def branch_b(graph_state: GraphState) -> GraphState:
-                return {"pieces": ["authority"]}
+                value_id = state.runtime.derive(
+                    (graph_state["value_id"],), "approval-marker",
+                    "langgraph-branch-B", state.branch_contexts["B"],
+                ).value_id
+                mapping["branch-B"] = value_id
+                return {"pieces": ["authority"], "branch_b_value_id": value_id}
 
             def join(graph_state: GraphState) -> GraphState:
                 assert set(graph_state["pieces"]) == {"target", "authority"}
-                mapping["join-state"] = graph_state["value_id"]
-                return {"payload": graph_state["payload"]}
+                joined = state.runtime.join(
+                    "main",
+                    (graph_state["branch_a_value_id"],
+                     graph_state["branch_b_value_id"]),
+                    graph_state["payload"], state.context_ref,
+                )
+                mapping["join-state"] = joined.value_id
+                return {
+                    "payload": graph_state["payload"],
+                    "value_id": joined.value_id,
+                    "join_value_id": joined.value_id,
+                }
 
             builder.add_node("branch_a", branch_a)
             builder.add_node("branch_b", branch_b)
             builder.add_node("join", join)
-            builder.add_edge(START, "branch_a")
-            builder.add_edge(START, "branch_b")
+            builder.add_edge(parent, "branch_a")
+            builder.add_edge(parent, "branch_b")
             builder.add_edge(["branch_a", "branch_b"], "join")
             tail = "join"
-        else:
-            raise ValueError(f"Unknown channel {scenario.channel}")
 
         if scenario.family == "cross_task":
             def task_switch(graph_state: GraphState) -> GraphState:
                 mapping["task-switch-state"] = graph_state["value_id"]
                 state.runtime.observe_boundary(
                     "task-switch", graph_state["value_id"],
-                    graph_state["value_id"], represented_fields=("task",),
+                    graph_state["value_id"],
                 )
                 return {"task": "T2"}
 
@@ -129,12 +188,23 @@ class LangGraphAdapter:
 
         if backend is not None:
             def agent(graph_state: GraphState) -> GraphState:
+                if scenario.channel == "DIRECT_OR_MESSAGE":
+                    native_input = deepcopy(graph_state["messages"][-1])
+                    native_kind = "HumanMessage"
+                    native_digest = digest(native_input.model_dump())
+                else:
+                    native_input = deepcopy(dict(graph_state))
+                    native_kind = ("checkpoint_state" if scenario.channel ==
+                                   "SHARED_STATE_OR_MEMORY" else "joined_graph_state")
+                    native_digest = digest(native_input)
                 state.runtime.event(
                     "ModelInput", task_digest=digest(scenario.task_text),
                     value_id=graph_state["value_id"],
                     payload_digest=digest(graph_state["payload"]),
+                    native_kind=native_kind,
+                    native_input_digest=native_digest,
                 )
-                attempt = backend.run(scenario.task_text, deepcopy(graph_state["payload"]))
+                attempt = backend.run(AgentInput(scenario.task_text, native_input))
                 state.runtime.event(
                     "ModelOutput", status=attempt.status,
                     tool_call_digest=digest({

@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Iterable
 
-from .model import Scenario
+from .model import AuthorizedActionSpec, Scenario
 
 FAMILIES = ("sibling", "cross_task", "cross_epoch", "fork_join")
 CHANNELS = ("DIRECT_OR_MESSAGE", "SHARED_STATE_OR_MEMORY", "SPLIT_TRANSFORM_JOIN")
@@ -22,8 +22,10 @@ def golden_pairs() -> tuple[tuple[Scenario, Scenario], ...]:
         (
             Scenario(f"{key}-attack", key, family, channel, False, args, tool,
                      metadata={"trusted": True, "task_id": "T2", "approval_valid": True,
-                               "epoch": "current", "source": "user"}),
-            Scenario(f"{key}-legal", key, family, channel, True, args, tool),
+                               "epoch": "current", "source": "user"},
+                     authorized_action_spec=AuthorizedActionSpec.exact(tool, args)),
+            Scenario(f"{key}-legal", key, family, channel, True, args, tool,
+                     authorized_action_spec=AuthorizedActionSpec.exact(tool, args)),
         )
         for key, family, channel, tool, args in definitions
     )
@@ -36,6 +38,8 @@ def validate_pair(attack: Scenario, legal: Scenario) -> None:
         raise ValueError("Twins must share family and template")
     if attack.terminal_signature() != legal.terminal_signature():
         raise ValueError("Matched-pair terminal call differs")
+    if attack.authorized_action_spec != legal.authorized_action_spec:
+        raise ValueError("Matched-pair authorization rule differs")
 
 
 def flatten_pairs(pairs: Iterable[tuple[Scenario, Scenario]]) -> tuple[Scenario, ...]:

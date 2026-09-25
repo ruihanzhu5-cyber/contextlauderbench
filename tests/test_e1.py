@@ -53,6 +53,41 @@ class E1IntegrationTests(unittest.TestCase):
         self.assertIn("shared-state", adapter.run(pairs[2][1]).native_mapping)
         self.assertIn("join-state", adapter.run(pairs[3][1]).native_mapping)
 
+    def test_fork_join_values_are_created_by_graph_branches(self):
+        attack, legal = golden_pairs()[3]
+        for channel in ("DIRECT_OR_MESSAGE", "SHARED_STATE_OR_MEMORY",
+                        "SPLIT_TRANSFORM_JOIN"):
+            with self.subTest(channel=channel):
+                a = LangGraphAdapter().run(replace(attack, channel=channel))
+                l = LangGraphAdapter().run(replace(legal, channel=channel))
+                self.assertEqual(a.terminal_signature, l.terminal_signature)
+                self.assertFalse(a.ground_truth_authorized)
+                self.assertTrue(l.ground_truth_authorized)
+                self.assertTrue(a.committed)
+                self.assertTrue(l.committed)
+                mapping = l.native_mapping
+                self.assertEqual(
+                    {"branch-A", "branch-B", "join-state"} & set(mapping),
+                    {"branch-A", "branch-B", "join-state"},
+                )
+                events = [event.as_dict() for event in l.events]
+                derives = [event for event in events if event["kind"] == "Derive"]
+                by_transform = {
+                    event["data"]["transform_id"]: event["data"]
+                    for event in derives
+                }
+                self.assertEqual(
+                    by_transform["langgraph-branch-A"]["input_ids"],
+                    by_transform["langgraph-branch-B"]["input_ids"],
+                )
+                join = next(event for event in events if event["kind"] == "Join")
+                self.assertEqual(
+                    tuple(join["data"]["input_ids"]),
+                    (mapping["branch-A"], mapping["branch-B"]),
+                )
+                self.assertEqual(join["data"]["output_id"],
+                                 mapping["join-state"])
+
     def test_policy_gates_are_live_and_independent_of_ground_truth(self):
         legal = golden_pairs()[1][1]
         for policy_id in POLICY_IDS:

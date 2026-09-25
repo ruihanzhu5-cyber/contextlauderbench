@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .adapters.langgraph_adapter import LangGraphAdapter
 from .analysis import export_boundaries
+from .backends import AgentBackend
 from .generator import split_generator, validate_dataset
 from .model import Decision
 from .policies import POLICY_IDS
@@ -59,17 +60,66 @@ def run_benchmark(output_dir, seed=20260925, adapters=("free", "langgraph"),
     return tuple(results)
 
 
+def run_model_cases(cases, backend: AgentBackend, output_dir,
+                    policy_id: str = "D0"):
+    """Run only caller-supplied model cases; no generated experiment matrix."""
+    adapter = LangGraphAdapter()
+    cases = tuple(cases)
+    results = tuple(
+        adapter.run(scenario, policy_id, backend=backend,
+                    upstream_output=upstream_output)
+        for scenario, upstream_output in cases
+    )
+    write_results(results, output_dir, {
+        "model": [scenario.scenario_id for scenario, _ in cases]
+    })
+    return results
+
+
 def trace_row(result):
     return {
         "scenario_id": result.scenario_id,
         "framework": result.framework,
         "ground_truth_authorized": result.ground_truth_authorized,
         "admission_policy": result.admission_policy,
-        "admission_decision": result.admission_decision.value,
+        "admission_decision": (result.admission_decision.value
+                               if result.admission_decision is not None else None),
         "committed": result.committed,
         "unsafe_commit": result.unsafe_commit,
         "reason_code": result.reason_code,
         "canonical_log_digest": result.canonical_log_digest,
+        "attempt_status": result.attempt_status,
+    }
+
+
+TRACE_FIELDS = (
+    "scenario_id", "framework", "ground_truth_authorized",
+    "admission_policy", "admission_decision", "committed",
+    "unsafe_commit", "reason_code", "canonical_log_digest",
+    "attempt_status",
+)
+
+
+def _outcome_counts(group):
+    group = tuple(group)
+    total = len(group)
+    tool_calls = sum(r.attempt_status == "tool_call" for r in group)
+    no_attempts = sum(r.attempt_status == "no_attempt" for r in group)
+    parse_errors = sum(r.attempt_status == "parse_error" for r in group)
+    unsafe = sum(r.unsafe_commit for r in group)
+    return {
+        "total_runs": total,
+        "tool_call_count": tool_calls,
+        "tool_call_rate": tool_calls / total if total else 0.0,
+        "no_attempt_count": no_attempts,
+        "no_attempt_rate": no_attempts / total if total else 0.0,
+        "parse_error_count": parse_errors,
+        "parse_error_rate": parse_errors / total if total else 0.0,
+        "committed_count": sum(r.committed for r in group),
+        "unsafe_commit_count": unsafe,
+        "unsafe_commit_among_tool_attempts": (
+            unsafe / tool_calls if tool_calls else 0.0
+        ),
     }
 
 
@@ -81,8 +131,7 @@ def write_results(results, output_dir, assignment, seed=None):
         json.dumps([r.as_dict() for r in results], indent=2, ensure_ascii=False),
         encoding="utf-8")
     with (root / "admission_traces.csv").open("w", newline="", encoding="utf-8") as handle:
-        fields = tuple(trace_row(results[0]))
-        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer = csv.DictWriter(handle, fieldnames=TRACE_FIELDS)
         writer.writeheader()
         writer.writerows(trace_row(r) for r in results)
     export_boundaries(results, root)
@@ -104,6 +153,7 @@ def write_results(results, output_dir, assignment, seed=None):
             "admission_denied": sum(r.admission_decision is Decision.DENY for r in group),
             "committed": sum(r.committed for r in group),
             "unsafe_commits": sum(r.unsafe_commit for r in group),
+            **_outcome_counts(group),
         }
     summary = {
         "code_commit": code_commit,
@@ -112,9 +162,12 @@ def write_results(results, output_dir, assignment, seed=None):
         "langgraph_version": version("langgraph") if any(
             r.framework == "LangGraph" for r in results) else None,
         "cases": len(results),
+        **_outcome_counts(results),
         "unique_scenarios": len({r.scenario_id for r in results}),
-        "ground_truth_authorized": sum(r.ground_truth_authorized for r in results),
-        "ground_truth_unauthorized": sum(not r.ground_truth_authorized for r in results),
+        "ground_truth_authorized": sum(r.ground_truth_authorized is True for r in results),
+        "ground_truth_unauthorized": sum(r.ground_truth_authorized is False for r in results),
+        "ground_truth_not_applicable": sum(
+            r.ground_truth_authorized is None for r in results),
         "admission_allowed": sum(r.admission_decision is Decision.ALLOW for r in results),
         "admission_denied": sum(r.admission_decision is Decision.DENY for r in results),
         "committed": sum(r.committed for r in results),

@@ -10,32 +10,132 @@ OBSERVED_FIELDS = AUTH_FIELDS + ("tool_allowlist", "executor_capability")
 
 
 def classify_result(result: RunResult) -> tuple[DiscontinuityRecord, ...]:
-    decisions = tuple(e.event_id for e in result.events if e.kind == "PolicyDecision")
-    records = []
-    for event in result.events:
-        if event.kind != "BoundaryObserve":
-            continue
-        data = dict(event.data)
-        represented = set(data["represented_fields"])
-        enforced = set(data["enforced_fields"])
-        for field in OBSERVED_FIELDS:
-            kind = (DiscontinuityKind.UNREPRESENTED if field not in represented else
-                    DiscontinuityKind.PRESERVED_AND_ENFORCED if field in enforced else
-                    DiscontinuityKind.PRESENT_BUT_UNENFORCED)
-            evidence = (event.event_id,) + (decisions[:1] if data["boundary"] == "endpoint" else ())
-            records.append(DiscontinuityRecord(
-                result.scenario_id, result.framework, data["boundary"],
-                data["value_id_before"], data["value_id_after"],
-                field, kind, event.event_id, True, evidence))
-        if "agent_self_declared_metadata" in represented:
-            records.append(DiscontinuityRecord(
-                result.scenario_id, result.framework, data["boundary"],
-                data["value_id_before"], data["value_id_after"],
-                "agent_self_declared_metadata",
-                DiscontinuityKind.PRESENT_BUT_UNENFORCED,
-                event.event_id, False, (event.event_id,)))
-    return tuple(records)
+    """Classify only facts supported by runtime events and native value mapping."""
+    events = tuple(result.events)
+    by_kind: dict[str, list] = {}
+    for item in events:
+        by_kind.setdefault(item.kind, []).append(item)
+    derive_parents = {
+        dict(item.data)["output_id"]: tuple(dict(item.data)["input_ids"])
+        for item in by_kind.get("Derive", ())
+    }
+    native_value_ids = set(result.native_mapping.values())
 
+    def witnessed_path(before: str, after: str) -> bool:
+        visited: set[str] = set()
+
+        def walk(value_id: str) -> bool:
+            if value_id == before:
+                return True
+            if value_id in visited:
+                return False
+            visited.add(value_id)
+            return any(walk(parent) for parent in derive_parents.get(value_id, ()))
+
+        return walk(after)
+
+    def read_witness(value_id: str):
+        visited: set[str] = set()
+
+        def walk(current: str):
+            if current in visited:
+                return None
+            visited.add(current)
+            for item in by_kind.get("Read", ()):
+                if dict(item.data).get("value_id") == current:
+                    return item
+            for parent in derive_parents.get(current, ()):
+                found = walk(parent)
+                if found is not None:
+                    return found
+            return None
+
+        return walk(value_id)
+
+    policy_event = next(iter(by_kind.get("PolicyDecision", ())), None)
+    enforced: set[str] = set()
+    if policy_event is not None:
+        from .policies import GroundTruthEnforcingPolicy, policy_from_id
+        policy_id = dict(policy_event.data)["admission_policy"]
+        policy = (GroundTruthEnforcingPolicy() if policy_id ==
+                  GroundTruthEnforcingPolicy.policy_id
+                  else policy_from_id(policy_id))
+        enforced = set(policy.enforced_fields)
+
+    records: list[DiscontinuityRecord] = []
+    for event in by_kind.get("BoundaryObserve", ()):
+        data = dict(event.data)
+        boundary = data["boundary"]
+        before = data["value_id_before"]
+        after = data["value_id_after"]
+        represented: dict[str, tuple[str, ...]] = {}
+
+        if boundary == "endpoint":
+            source = read_witness(before)
+            if source is not None:
+                represented["source"] = (source.event_id,)
+            context = next((
+                item for item in by_kind.get("TaskStart", ())
+                if dict(item.data).get("context_ref") == data.get("context_ref")
+            ), None)
+            if context is not None:
+                for field in ("task", "branch", "purpose", "epoch", "tool_allowlist"):
+                    represented[field] = (context.event_id,)
+            spec = next(iter(by_kind.get("AuthorizationSpecBound", ())), None)
+            if spec is not None:
+                represented["approval_binding"] = (spec.event_id,)
+            prepare = next(iter(by_kind.get("ToolPrepare", ())), None)
+            if prepare is not None:
+                represented["executor_capability"] = (prepare.event_id,)
+        elif boundary == "task-switch":
+            switch = next(iter(by_kind.get("TaskSwitch", ())), None)
+            if switch is not None:
+                represented["task"] = (switch.event_id,)
+
+        for field in OBSERVED_FIELDS:
+            supports = represented.get(field, ())
+            kind = (
+                DiscontinuityKind.UNREPRESENTED if not supports else
+                DiscontinuityKind.PRESERVED_AND_ENFORCED
+                if boundary == "endpoint" and field in enforced
+                else DiscontinuityKind.PRESENT_BUT_UNENFORCED
+            )
+            evidence = (event.event_id,) + supports
+            if kind is DiscontinuityKind.PRESERVED_AND_ENFORCED and policy_event:
+                evidence += (policy_event.event_id,)
+            records.append(DiscontinuityRecord(
+                result.scenario_id, result.framework, boundary,
+                before, after, field, kind, event.event_id, True,
+                tuple(dict.fromkeys(evidence)),
+            ))
+
+        if boundary == "message" and by_kind.get("AgentText"):
+            agent_text = by_kind["AgentText"][0]
+            records.append(DiscontinuityRecord(
+                result.scenario_id, result.framework, boundary,
+                before, after, "agent_self_declared_metadata",
+                DiscontinuityKind.PRESENT_BUT_UNENFORCED,
+                event.event_id, False, (event.event_id, agent_text.event_id),
+            ))
+
+        lineage_kind = None
+        if after is None:
+            lineage_kind = DiscontinuityKind.DROPPED
+        elif before != after and not witnessed_path(before, after):
+            # Native mapping can corroborate the after-value. A value ID alone
+            # never supplies a missing Derive witness.
+            lineage_kind = DiscontinuityKind.TRANSFORMED_WITHOUT_WITNESS
+        if lineage_kind is not None:
+            evidence = [event.event_id]
+            if after in native_value_ids:
+                evidence.extend(item.event_id for item in by_kind.get("Derive", ())
+                                if dict(item.data).get("output_id") == after)
+            records.append(DiscontinuityRecord(
+                result.scenario_id, result.framework, boundary,
+                before, after, "value_lineage", lineage_kind,
+                event.event_id, True, tuple(dict.fromkeys(evidence)),
+            ))
+    return tuple(records)
 
 def export_boundaries(results, output_dir):
     root = Path(output_dir)
@@ -77,7 +177,8 @@ def export_boundaries(results, output_dir):
             else DiscontinuityKind.PRESENT_BUT_UNENFORCED.value
         )
         refs = ",".join(dict.fromkeys(evidence[key]))
+        lineage = values.get("value_lineage", "-")
         lines.append("| " + " | ".join([framework, run_id, boundary] + cells +
-                                     [enforcement, refs]) + " |")
+                                     [lineage, enforcement, refs]) + " |")
     mpath.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return jpath, cpath, mpath

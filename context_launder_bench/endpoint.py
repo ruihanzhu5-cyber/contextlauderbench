@@ -39,14 +39,9 @@ class UnifiedMockEndpoint:
         token = object()
         self.__live_tokens.add(token)
         self.__last_token = token
-        represented = (
-            "source", "task", "branch", "purpose", "epoch",
-            "approval_binding", "tool_allowlist", "executor_capability",
-        )
         self.__runtime.observe_boundary(
             "endpoint", request.value_id, request.value_id,
-            represented_fields=represented,
-            enforced_fields=self.__policy.enforced_fields,
+            context_ref=request.runtime_context_ref,
         )
         self.__runtime.event(
             "ToolPrepare", tool=request.tool_name, args_digest=digest(request.arguments),

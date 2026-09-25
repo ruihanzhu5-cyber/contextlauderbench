@@ -17,6 +17,9 @@ class GroundTruthOracle:
     """Read trusted facts and return only whether this action was authorized."""
 
     def authorized(self, runtime: TrustedRuntime, request: ToolRequest) -> bool:
+        spec = runtime.authorized_action_spec
+        if spec is None or not spec.permits(request):
+            return False
         if set(request.arguments) != BUSINESS_ARGUMENTS.get(request.tool_name):
             return False
         context = runtime.context(request.runtime_context_ref)

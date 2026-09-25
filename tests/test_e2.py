@@ -3,8 +3,8 @@ import tempfile
 import unittest
 
 from context_launder_bench.adapters.langgraph_adapter import LangGraphAdapter
-from context_launder_bench.analysis import export_boundaries
-from context_launder_bench.model import DiscontinuityKind
+from context_launder_bench.analysis import classify_result, export_boundaries
+from context_launder_bench.model import DiscontinuityKind, RunResult
 from context_launder_bench.scenarios import flatten_pairs, golden_pairs
 
 
@@ -28,6 +28,41 @@ class E2BoundaryTests(unittest.TestCase):
                           DiscontinuityKind.PRESENT_BUT_UNENFORCED)
             self.assertIs(records["approval_binding"],
                           DiscontinuityKind.PRESENT_BUT_UNENFORCED)
+
+    def test_drop_and_unwitnessed_transform_need_value_evidence(self):
+        from context_launder_bench.runtime import TrustedRuntime
+        runtime = TrustedRuntime("e2-value", "sibling")
+        context = runtime.begin_task("user-A", "T2", "main",
+                                     "execute-request", 1, ["delete_file"])
+        before = runtime.seed_value("original", "trusted_user", context)
+        unrelated = runtime.seed_value("changed", "trusted_user", context)
+        witnessed = runtime.derive((before.value_id,), "changed",
+                                   "documented-transform", context)
+        runtime.observe_boundary("synthetic", before.value_id, None,
+                                 represented_fields=("source",))
+        runtime.observe_boundary("synthetic", before.value_id,
+                                 unrelated.value_id,
+                                 represented_fields=("source",))
+        runtime.observe_boundary("synthetic", before.value_id,
+                                 witnessed.value_id,
+                                 represented_fields=("source",))
+        result = RunResult(
+            "e2-value", "test", "D0", None, False, "NO_ATTEMPT", None,
+            runtime.events, runtime.canonical_log_digest(),
+            native_mapping={"unrelated": unrelated.value_id},
+            attempt_status="no_attempt",
+        )
+        records = classify_result(result)
+        lineages = [r.kind for r in records if r.field_or_relation == "value_lineage"]
+        self.assertEqual(lineages, [
+            DiscontinuityKind.DROPPED,
+            DiscontinuityKind.TRANSFORMED_WITHOUT_WITNESS,
+        ])
+        self.assertTrue(all(
+            r.kind is DiscontinuityKind.UNREPRESENTED
+            for r in records if r.boundary == "synthetic"
+            and r.field_or_relation == "source"
+        ))
 
     def test_five_boundaries_and_trace_evidence(self):
         results = [LangGraphAdapter().run(s) for s in flatten_pairs(golden_pairs())]

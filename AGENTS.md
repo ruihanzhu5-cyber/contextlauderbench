@@ -1,22 +1,19 @@
 # Engineering rules
 
-- Treat CONTEXTLAUNDERBENCH_EXPERIMENT_PLAN_v0.2.md as the authority for E0–E3-mini.
-- Do not call any LLM API or install any model SDK.
+- Treat SPEC.md and the current user request as the authority for E0–E3-mini.
 - Do not implement E4 or later phases.
-- E1 integrates LangGraph only. Do not integrate Microsoft Agent Framework or AutoGen yet.
-- Agent self-declared metadata is always untrusted.
-- Approval, task, purpose, epoch, principal, branch, nonce, and provenance never enter tool business arguments.
-- Ground truth, authorization context, event log, and commit authority belong to the trusted runtime.
-- Every side effect goes through the unified endpoint.
-- Framework adapters must not own or mutate security truth.
-- Do not skip failing tests.
-- Do not edit expected verdicts to make tests pass.
+- LangGraph is the only agent framework in scope.
+- Keep default tests independent of external LLM APIs; use fake/recording clients. A separately requested provider smoke run may use an environment-supplied API key.
+- Never hardcode, log or commit an API key.
+- Agent self-declared metadata is untrusted.
+- Approval, task, purpose, epoch, principal, branch, nonce and provenance never enter tool business arguments.
+- TrustedRuntime owns authorization facts and the event log. AdmissionPolicy controls endpoint admission; UnifiedMockEndpoint alone writes mock effects.
+- Framework and LLM adapters must not own or mutate security truth.
+- Do not skip failing tests or edit expected verdicts merely to pass tests.
 - A crash is not a successful defense.
-- E3-mini is generator-first; do not handwrite the complete task matrix.
-- Preserve user files. Keep all project files under this directory.
-
-- GroundTruthOracle is read-only and returns only a Boolean authorization label.
-- E1–E3 endpoint admission must use the selected D0–D3 AdmissionPolicy, never GroundTruthEnforcingPolicy.
-- D0 is AllowAll/default; an unauthorized reached call may commit. Calculate UnsafeCommit after execution.
+- E3-mini is generator-first; do not handwrite a larger task matrix.
+- Preserve user files and keep project files under this directory.
+- GroundTruthOracle is read-only and returns only a Boolean for a real ToolRequest.
+- D0 is AllowAll/default; an unauthorized reached call may commit. Calculate UnsafeCommit afterward.
 - GroundTruthEnforcingPolicy is an E0 infrastructure validation fixture only.
-- Keep ground truth, admission decision, and commit state as separate result fields.
+- Keep ground truth, admission decision and commit state separate in results.

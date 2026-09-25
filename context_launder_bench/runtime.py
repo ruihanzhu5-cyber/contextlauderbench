@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from threading import RLock
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 
 from .model import (
-    BusinessValue, Event, RuntimeEnvelope, ToolRequest,
+    AuthorizedActionSpec, BusinessValue, Event, RuntimeEnvelope, ToolRequest,
     TrustedAuthorizationContext, canonical, digest,
 )
 
@@ -28,6 +29,7 @@ class TrustedRuntime:
         self.run_id = run_id
         self.__scenario_family = scenario_family
 
+        self.__lock = RLock()
         self.__events: list[Event] = []
         self.__contexts: dict[str, TrustedAuthorizationContext] = {}
         self.__values: dict[str, BusinessValue] = {}
@@ -41,6 +43,7 @@ class TrustedRuntime:
         self.__epoch: dict[str, int] = {}
         self.__revoked: set[str] = set()
         self.__capabilities: dict[str, tuple[str, frozenset[str]]] = {}
+        self.__authorized_action_spec: AuthorizedActionSpec | None = None
         self.__memory: dict[str, str] = {}
         self.__value_counter = 0
         self.__context_counter = 0
@@ -54,18 +57,21 @@ class TrustedRuntime:
         return tuple(self.__events)
 
     def event(self, kind: str, **data: Any) -> Event:
-        event = Event(f"e{len(self.__events)+1:04d}", kind, tuple(sorted(data.items())))
-        self.__events.append(event)
-        return event
+        with self.__lock:
+            event = Event(f"e{len(self.__events)+1:04d}",
+                          kind, tuple(sorted(data.items())))
+            self.__events.append(event)
+            return event
 
     def observe_boundary(self, boundary: str, value_id_before: str,
                          value_id_after: str | None, represented_fields=(),
-                         enforced_fields=()) -> Event:
+                         enforced_fields=(), context_ref: str | None = None) -> Event:
         return self.event("BoundaryObserve", boundary=boundary,
                           value_id_before=value_id_before,
                           value_id_after=value_id_after,
                           represented_fields=tuple(represented_fields),
-                          enforced_fields=tuple(enforced_fields))
+                          enforced_fields=tuple(enforced_fields),
+                          context_ref=context_ref)
 
     def canonical_log_digest(self) -> str:
         return digest([event.as_dict() for event in self.__events])
@@ -79,7 +85,8 @@ class TrustedRuntime:
         )
         self.__epoch.setdefault(task_id, epoch)
         self.event("TaskStart", task_id=task_id, principal=principal,
-                   purpose=purpose, epoch=epoch, branch_id=branch_id)
+                   purpose=purpose, epoch=epoch, branch_id=branch_id,
+                   context_ref=ref, allowed_sinks=tuple(sorted(allowed_sinks)))
         return ref
 
     def context(self, ref: str) -> TrustedAuthorizationContext | None:
@@ -87,6 +94,16 @@ class TrustedRuntime:
 
     def current_epoch(self, task_id: str) -> int | None:
         return self.__epoch.get(task_id)
+
+    def bind_authorized_action(self, spec: AuthorizedActionSpec) -> None:
+        if self.__authorized_action_spec is not None:
+            raise ValueError("Authorized action already bound")
+        self.__authorized_action_spec = spec
+        self.event("AuthorizationSpecBound", spec_digest=spec.binding_digest())
+
+    @property
+    def authorized_action_spec(self) -> AuthorizedActionSpec | None:
+        return self.__authorized_action_spec
 
     def grant_capability(self, capability_id: str, executor_id: str,
                          tools: Iterable[str]) -> None:
@@ -114,6 +131,11 @@ class TrustedRuntime:
 
     def derive(self, input_ids: Iterable[str], payload: Any, transform_id: str,
                context_ref: str) -> RuntimeEnvelope:
+        with self.__lock:
+            return self._derive_locked(input_ids, payload, transform_id, context_ref)
+
+    def _derive_locked(self, input_ids: Iterable[str], payload: Any, transform_id: str,
+               context_ref: str) -> RuntimeEnvelope:
         parents = tuple(input_ids)
         if not parents or any(p not in self.__values for p in parents):
             raise ValueError("Missing input value")
@@ -135,7 +157,7 @@ class TrustedRuntime:
     def send(self, sender: str, receiver: str, value_id: str) -> Event:
         self._require_value(value_id)
         event = self.event("Send", sender=sender, receiver=receiver, value_id=value_id)
-        self.observe_boundary("message", value_id, value_id, represented_fields=("agent_self_declared_metadata",))
+        self.observe_boundary("message", value_id, value_id)
         return event
 
     def spawn(self, parent: str, child: str, branch_id: str) -> Event:
@@ -174,7 +196,10 @@ class TrustedRuntime:
         context = self.context(request.runtime_context_ref)
         if context is None or scope in self.__revoked:
             return None
-        action = digest({"tool": request.tool_name, "arguments": request.arguments})
+        spec = self.__authorized_action_spec
+        if spec is None or not spec.permits(request):
+            return None
+        action = spec.binding_digest()
         for item in reversed(self.__endorsements):
             if (item.principal == context.principal and item.task_id == context.task_id
                     and item.epoch == context.epoch and item.scope == scope
@@ -211,23 +236,39 @@ class TrustedRuntime:
         return self.__envelopes.get(value_id)
 
     def provenance_valid(self, value_id: str) -> bool:
-        seen: set[str] = set()
-        def check(v: str) -> bool:
-            if v in seen or v not in self.__values or v not in self.__parents:
+        # A shared ancestor is valid in a DAG; only a node on the active
+        # recursion path indicates a cycle.
+        memo: dict[str, bool] = {}
+        active: set[str] = set()
+        event_by_id = {event.event_id: event for event in self.__events}
+
+        def check(current: str) -> bool:
+            if current in memo:
+                return memo[current]
+            if current in active or current not in self.__values:
                 return False
-            seen.add(v)
-            witness = self.__witnesses.get(v)
-            matching = next((e for e in self.__events if e.event_id == witness), None)
-            if matching is None:
+            parents = self.__parents.get(current)
+            if parents is None:
                 return False
-            if dict(matching.data).get("payload_digest") != digest(self.__values[v].payload):
+            witness = event_by_id.get(self.__witnesses.get(current, ""))
+            if witness is None or dict(witness.data).get("payload_digest") != digest(
+                self.__values[current].payload
+            ):
+                memo[current] = False
                 return False
-            parents = self.__parents[v]
-            if parents and not any(e.kind == "Derive" and
-                dict(e.data).get("output_id") == v and
-                tuple(dict(e.data).get("input_ids", ())) == parents for e in self.__events):
+            if parents and not (
+                witness.kind == "Derive"
+                and dict(witness.data).get("output_id") == current
+                and tuple(dict(witness.data).get("input_ids", ())) == parents
+            ):
+                memo[current] = False
                 return False
-            return all(check(p) for p in parents)
+            active.add(current)
+            valid = all(check(parent) for parent in parents)
+            active.remove(current)
+            memo[current] = valid
+            return valid
+
         return check(value_id)
 
     def roots(self, value_id: str) -> tuple[str, ...]:

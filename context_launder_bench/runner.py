@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
-from .backends import ScriptedBackend, ToolAttempt
+from .backends import AgentInput, ScriptedBackend, ToolAttempt
 from .endpoint import UnifiedMockEndpoint
 from .model import RunResult, Scenario, canonical, digest
 from .oracle import GroundTruthOracle
@@ -18,11 +18,14 @@ class ExecutionState:
     context_ref: str
     value_id: str
     native_mapping: dict[str, str] = field(default_factory=dict)
+    branch_contexts: dict[str, str] = field(default_factory=dict)
 
 
 def prepare_scenario(scenario: Scenario, policy_id: str = "D0",
-                     source_payload: Any = None) -> ExecutionState:
-    return _prepare_scenario(scenario, policy_from_id(policy_id), source_payload)
+                     source_payload: Any = None,
+                     defer_fork_join: bool = False) -> ExecutionState:
+    return _prepare_scenario(
+        scenario, policy_from_id(policy_id), source_payload, defer_fork_join)
 
 
 def prepare_e0_scenario(scenario: Scenario) -> ExecutionState:
@@ -30,13 +33,19 @@ def prepare_e0_scenario(scenario: Scenario) -> ExecutionState:
 
 
 def _prepare_scenario(scenario: Scenario, admission_policy: AdmissionPolicy,
-                      source_payload: Any = None) -> ExecutionState:
+                      source_payload: Any = None,
+                      defer_fork_join: bool = False) -> ExecutionState:
     runtime = TrustedRuntime(scenario.scenario_id, scenario.family)
     endpoint = UnifiedMockEndpoint(runtime, admission_policy)
     runtime.grant_capability(scenario.capability_id, scenario.executor_id, [scenario.tool_name])
-    action = digest({"tool": scenario.tool_name, "arguments": scenario.arguments})
+    spec = scenario.authorized_action_spec
+    if spec is None:
+        raise ValueError("Scenario requires a trusted authorized_action_spec")
+    runtime.bind_authorized_action(spec)
+    action = spec.binding_digest()
     payload = dict(scenario.arguments) if source_payload is None else source_payload
     model_mode = source_payload is not None
+    branch_contexts: dict[str, str] = {}
     context_ref = runtime.begin_task("user-A", "T2", "main", "execute-request",
                                      1, [scenario.tool_name])
     if scenario.family == "sibling":
@@ -57,8 +66,7 @@ def _prepare_scenario(scenario: Scenario, admission_policy: AdmissionPolicy,
         runtime.endorse("user-A", action, approval_task, "cross_task", 1)
         runtime.event("TaskSwitch", from_task="T1", to_task="T2",
                       context_before=old_ref, context_after=context_ref)
-        runtime.observe_boundary("task-switch", value_id, value_id,
-                                 represented_fields=("task",))
+        runtime.observe_boundary("task-switch", value_id, value_id)
     elif scenario.family == "cross_epoch":
         env = runtime.seed_value(payload, "trusted_user", context_ref)
         runtime.memory_write("target", env.value_id)
@@ -77,17 +85,24 @@ def _prepare_scenario(scenario: Scenario, admission_policy: AdmissionPolicy,
                                    [scenario.tool_name])
         b_ref = runtime.begin_task("user-A", "T2", "branch-B", "approval", 1,
                                    [scenario.tool_name])
-        target_payload = payload.get("account") if isinstance(payload, Mapping) else payload
-        target = runtime.seed_value(target_payload,
-                                    "trusted_workflow", a_ref)
-        marker = runtime.seed_value("approval-marker", "trusted_workflow", b_ref)
-        value_id = runtime.join("main", (target.value_id, marker.value_id),
-                                payload, context_ref).value_id
+        if defer_fork_join:
+            # The graph branches derive their values from this common source.
+            value_id = runtime.seed_value(
+                payload, "trusted_workflow", context_ref).value_id
+            branch_contexts = {"A": a_ref, "B": b_ref}
+        else:
+            target_payload = payload.get("account") if isinstance(payload, Mapping) else payload
+            target = runtime.seed_value(target_payload,
+                                        "trusted_workflow", a_ref)
+            marker = runtime.seed_value("approval-marker", "trusted_workflow", b_ref)
+            value_id = runtime.join("main", (target.value_id, marker.value_id),
+                                    payload, context_ref).value_id
         binding = action if scenario.legal else digest({"scope": "general-payment"})
         runtime.endorse("user-A", binding, "T2", "fork_join", 1)
     else:
         raise ValueError(f"Unknown family: {scenario.family}")
-    return ExecutionState(runtime, endpoint, context_ref, value_id)
+    return ExecutionState(runtime, endpoint, context_ref, value_id,
+                          branch_contexts=branch_contexts)
 
 
 def apply_channel(state: ExecutionState, scenario: Scenario) -> None:
@@ -114,7 +129,9 @@ def finish_scenario(scenario: Scenario, state: ExecutionState,
                     attempt: ToolAttempt | None = None,
                     observed_payload: Any = None) -> RunResult:
     model_mode = attempt is not None
-    intent = attempt if attempt is not None else ScriptedBackend().run(scenario)
+    intent = (attempt if attempt is not None else
+              ScriptedBackend(scenario).run(AgentInput(
+                  scenario.task_text, state.runtime.value(state.value_id).payload)))
     # Self-declared metadata stays inert text, outside trusted runtime facts.
     if intent.self_declared_metadata:
         state.runtime.event("AgentText", payload_digest=digest(intent.self_declared_metadata))

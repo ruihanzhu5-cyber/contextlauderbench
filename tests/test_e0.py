@@ -122,6 +122,18 @@ class E0GoldenTests(unittest.TestCase):
         self.assertEqual(outcome.admission_decision, Decision.DENY)
         self.assertFalse(outcome.committed)
 
+    def test_shared_ancestor_diamond_is_valid_provenance(self):
+        from context_launder_bench.runtime import TrustedRuntime
+        runtime = TrustedRuntime("diamond", "fork_join")
+        context = runtime.begin_task("user-A", "T2", "main",
+                                     "execute-request", 1, ["make_payment"])
+        root = runtime.seed_value({"account": "A"}, "trusted_workflow", context)
+        left = runtime.derive((root.value_id,), "A", "branch-A", context)
+        right = runtime.derive((root.value_id,), "approval", "branch-B", context)
+        joined = runtime.join("main", (left.value_id, right.value_id),
+                              {"account": "A"}, context)
+        self.assertTrue(runtime.provenance_valid(joined.value_id))
+
     def test_e0_policy_not_selectable_for_e1_e3(self):
         with self.assertRaises(ValueError):
             prepare_scenario(golden_pairs()[0][0], "E0_GROUND_TRUTH_ENFORCING")
