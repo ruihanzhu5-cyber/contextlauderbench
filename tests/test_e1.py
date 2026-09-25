@@ -9,7 +9,7 @@ from context_launder_bench.benchmark import run_golden
 from context_launder_bench.model import Decision
 from context_launder_bench.oracle import GroundTruthOracle
 from context_launder_bench.policies import POLICY_IDS
-from context_launder_bench.runner import prepare_scenario
+from context_launder_bench.runner import prepare_scenario, run_free
 from context_launder_bench.scenarios import golden_pairs, validate_pair
 
 
@@ -87,6 +87,35 @@ class E1IntegrationTests(unittest.TestCase):
                 )
                 self.assertEqual(join["data"]["output_id"],
                                  mapping["join-state"])
+
+    def test_non_fork_split_join_has_runtime_branch_lineage(self):
+        for attack, legal in golden_pairs()[:3]:
+            pair = [replace(item, channel="SPLIT_TRANSFORM_JOIN")
+                    for item in (attack, legal)]
+            for scenario in pair:
+                with self.subTest(scenario=scenario.scenario_id):
+                    free = run_free(scenario)
+                    graph = LangGraphAdapter().run(scenario)
+                    self.assertEqual(free.ground_truth_authorized,
+                                     graph.ground_truth_authorized)
+                    self.assertEqual(free.unsafe_commit, graph.unsafe_commit)
+                    self.assertEqual(free.terminal_signature,
+                                     graph.terminal_signature)
+                    mapping = graph.native_mapping
+                    events = [event.as_dict() for event in graph.events]
+                    derives = {event["data"]["output_id"]: event["data"]
+                               for event in events if event["kind"] == "Derive"}
+                    left, right = mapping["branch-A"], mapping["branch-B"]
+                    self.assertEqual(derives[left]["input_ids"],
+                                     derives[right]["input_ids"])
+                    join = next(event for event in events
+                                if event["kind"] == "Join")
+                    self.assertEqual(tuple(join["data"]["input_ids"]),
+                                     (left, right))
+                    self.assertEqual(join["data"]["output_id"],
+                                     mapping["join-state"])
+            self.assertEqual(pair[0].terminal_signature(),
+                             pair[1].terminal_signature())
 
     def test_policy_gates_are_live_and_independent_of_ground_truth(self):
         legal = golden_pairs()[1][1]

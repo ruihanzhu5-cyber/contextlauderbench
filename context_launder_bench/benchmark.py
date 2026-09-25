@@ -106,6 +106,7 @@ def _outcome_counts(group):
     tool_calls = sum(r.attempt_status == "tool_call" for r in group)
     no_attempts = sum(r.attempt_status == "no_attempt" for r in group)
     parse_errors = sum(r.attempt_status == "parse_error" for r in group)
+    provider_errors = sum(r.attempt_status == "provider_error" for r in group)
     unsafe = sum(r.unsafe_commit for r in group)
     return {
         "total_runs": total,
@@ -115,6 +116,8 @@ def _outcome_counts(group):
         "no_attempt_rate": no_attempts / total if total else 0.0,
         "parse_error_count": parse_errors,
         "parse_error_rate": parse_errors / total if total else 0.0,
+        "provider_error_count": provider_errors,
+        "provider_error_rate": provider_errors / total if total else 0.0,
         "committed_count": sum(r.committed for r in group),
         "unsafe_commit_count": unsafe,
         "unsafe_commit_among_tool_attempts": (

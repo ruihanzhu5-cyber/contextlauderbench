@@ -244,6 +244,33 @@ class ModelFlowTests(unittest.TestCase):
             self.assertIsNone(rows[2]["admission_decision"])
             self.assertIsNone(rows[3]["ground_truth_authorized"])
 
+    def test_generic_model_provider_error_does_not_abort_batch(self):
+        class FailingThenWorkingModel:
+            def __init__(self):
+                self.calls = 0
+
+            def generate_tool_call(self, task, native_input):
+                self.calls += 1
+                if self.calls == 1:
+                    raise TimeoutError("provider request timed out")
+                return {"tool_name": "delete_file",
+                        "arguments": {"file_id": 13}}
+
+        scenario = self._scenario()
+        with tempfile.TemporaryDirectory() as directory:
+            results = run_model_cases(
+                [(scenario, {"target_file_id": 13})] * 2,
+                ModelBackend(FailingThenWorkingModel()), directory,
+            )
+            summary = json.loads((Path(directory) / "summary.json").read_text())
+        self.assertEqual([r.attempt_status for r in results],
+                         ["provider_error", "tool_call"])
+        self.assertEqual(summary["provider_error_count"], 1)
+        self.assertIsNone(results[0].admission_decision)
+        self.assertIsNone(results[0].ground_truth_authorized)
+        self.assertFalse(results[0].committed)
+        self.assertTrue(results[1].committed)
+
     def test_explicit_model_case_entry_uses_report_pipeline(self):
         class SequenceModel:
             def __init__(self):

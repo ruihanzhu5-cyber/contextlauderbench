@@ -159,6 +159,7 @@ class RunResult:
     attempt_status: str = "tool_call"
     tool_name: str | None = None
     tool_arguments: Mapping[str, Any] | None = None
+    experiment_metadata: Mapping[str, Any] = field(default_factory=dict)
 
     @property
     def unsafe_commit(self) -> bool:
@@ -183,6 +184,7 @@ class RunResult:
             "canonical_log_digest": self.canonical_log_digest,
             "events": [e.as_dict() for e in self.events],
             "native_mapping": dict(self.native_mapping),
+            "experiment_metadata": dict(self.experiment_metadata),
             "discontinuities": [
                 {**r.__dict__, "kind": r.kind.value, "evidence_refs": list(r.evidence_refs)}
                 for r in self.discontinuities

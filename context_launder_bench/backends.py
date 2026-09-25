@@ -20,10 +20,14 @@ class ToolAttempt:
     arguments: Mapping[str, Any] | None = None
     self_declared_metadata: Mapping[str, Any] = field(default_factory=dict)
     error: str | None = None
+    provider_response_id: str | None = None
+    finish_reason: str | None = None
+    prompt_digest: str | None = None
 
 
 class AgentBackend(Protocol):
     def run(self, agent_input: AgentInput) -> ToolAttempt: ...
+    def experiment_metadata(self) -> Mapping[str, Any]: ...
 
 
 class ScriptedBackend:
@@ -31,6 +35,9 @@ class ScriptedBackend:
 
     def __init__(self, scenario: Scenario):
         self.scenario = scenario
+
+    def experiment_metadata(self) -> Mapping[str, Any]:
+        return {"provider": "scripted", "model": None, "model_config": {}}
 
     def run(self, agent_input: AgentInput) -> ToolAttempt:
         return ToolAttempt(
@@ -78,7 +85,14 @@ class ModelBackend:
     def __init__(self, model: ToolCallModel):
         self.model = model
 
+    def experiment_metadata(self) -> Mapping[str, Any]:
+        return {"provider": "custom", "model": type(self.model).__name__,
+                "model_config": {}}
+
     def run(self, agent_input: AgentInput) -> ToolAttempt:
-        raw = self.model.generate_tool_call(
-            agent_input.task_text, agent_input.native_input)
+        try:
+            raw = self.model.generate_tool_call(
+                agent_input.task_text, agent_input.native_input)
+        except Exception as exc:
+            return ToolAttempt("provider_error", error=type(exc).__name__)
         return parse_tool_attempt(raw)

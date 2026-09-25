@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
+from dataclasses import replace
 import operator
 from typing import Annotated, Any, TypedDict
 
@@ -106,17 +107,34 @@ class LangGraphAdapter:
                 tail = START
             else:
                 def branch_a(graph_state: GraphState) -> GraphState:
-                    return {"pieces": ["target"]}
+                    value_id = state.runtime.derive(
+                        (graph_state["value_id"],), graph_state["payload"],
+                        "langgraph-channel-branch-A", state.context_ref,
+                    ).value_id
+                    mapping["branch-A"] = value_id
+                    return {"pieces": ["target"], "branch_a_value_id": value_id}
 
                 def branch_b(graph_state: GraphState) -> GraphState:
-                    return {"pieces": ["authority"]}
+                    value_id = state.runtime.derive(
+                        (graph_state["value_id"],), "channel-witness",
+                        "langgraph-channel-branch-B", state.context_ref,
+                    ).value_id
+                    mapping["branch-B"] = value_id
+                    return {"pieces": ["authority"], "branch_b_value_id": value_id}
 
                 def join(graph_state: GraphState) -> GraphState:
                     assert set(graph_state["pieces"]) == {"target", "authority"}
-                    mapping["join-state"] = graph_state["value_id"]
+                    joined = state.runtime.join(
+                        "executor-main",
+                        (graph_state["branch_a_value_id"],
+                         graph_state["branch_b_value_id"]),
+                        graph_state["payload"], state.context_ref,
+                    )
+                    mapping["join-state"] = joined.value_id
                     return {
                         "payload": graph_state["payload"],
-                        "join_value_id": graph_state["value_id"],
+                        "value_id": joined.value_id,
+                        "join_value_id": joined.value_id,
                     }
 
                 builder.add_node("branch_a", branch_a)
@@ -217,6 +235,9 @@ class LangGraphAdapter:
                     "arguments": (dict(attempt.arguments)
                                   if attempt.arguments is not None else None),
                     "error": attempt.error,
+                    "provider_response_id": attempt.provider_response_id,
+                    "finish_reason": attempt.finish_reason,
+                    "prompt_digest": attempt.prompt_digest,
                 }}
 
             builder.add_node("agent", agent)
@@ -240,8 +261,24 @@ class LangGraphAdapter:
             raise AssertionError("Graph value has no runtime lineage")
         mapping["checkpoint"] = snapshot.values["value_id"]
         state.value_id = snapshot.values["value_id"]
-        return finish_scenario(
+        result = finish_scenario(
             scenario, state, "LangGraph", mapping,
             attempt=ToolAttempt(**output["attempt"]) if model_mode else None,
             observed_payload=output["payload"] if model_mode else None,
         )
+        if not model_mode:
+            return result
+        source_metadata = (backend.experiment_metadata()
+                           if hasattr(backend, "experiment_metadata") else
+                           {"provider": "custom",
+                            "model": type(backend).__name__, "model_config": {}})
+        return replace(result, experiment_metadata={
+            **source_metadata,
+            "framework": "LangGraph",
+            "scenario_id": scenario.scenario_id,
+            "upstream_input_digest": digest(upstream_output),
+            "task_digest": digest(scenario.task_text),
+            "prompt_digest": output["attempt"].get("prompt_digest"),
+            "provider_response_id": output["attempt"].get("provider_response_id"),
+            "finish_reason": output["attempt"].get("finish_reason"),
+        })

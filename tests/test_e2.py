@@ -86,7 +86,12 @@ class E2BoundaryTests(unittest.TestCase):
             self.assertTrue(all(p.exists() for p in paths))
             rows = json.loads(paths[0].read_text(encoding="utf-8"))
             self.assertEqual(len(rows), sum(len(r.discontinuities) for r in results))
-            self.assertIn("Trace evidence", paths[2].read_text(encoding="utf-8"))
+            markdown = paths[2].read_text(encoding="utf-8")
+            table = [line for line in markdown.splitlines() if line.startswith("|")]
+            self.assertGreater(len(table), 2)
+            self.assertIn("Value lineage", table[0])
+            widths = [len(line.strip("|").split("|")) for line in table]
+            self.assertTrue(all(width == widths[0] for width in widths), widths)
 
 
 if __name__ == "__main__":

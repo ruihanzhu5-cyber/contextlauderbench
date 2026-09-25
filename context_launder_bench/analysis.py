@@ -164,7 +164,7 @@ def export_boundaries(results, output_dir):
     lines = [
         "# Boundary matrix", "",
         "Each cell uses one of the five discontinuity kinds. Trace IDs resolve in results.json.", "",
-        "| Framework | Run | Boundary | Source | Task | Branch | Purpose | Epoch | Approval binding | Enforcement | Trace evidence |",
+        "| Framework | Run | Boundary | Source | Task | Branch | Purpose | Epoch | Approval binding | Value lineage | Enforcement | Trace evidence |",
         "|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for key, values in sorted(matrix.items()):

@@ -3,7 +3,7 @@
 - Treat SPEC.md and the current user request as the authority for E0–E3-mini.
 - Do not implement E4 or later phases.
 - LangGraph is the only agent framework in scope.
-- Keep default tests independent of external LLM APIs; use fake/recording clients. A separately requested provider smoke run may use an environment-supplied API key.
+- Keep default tests and GitHub CI independent of external LLM APIs; use fake/recording clients. A separately requested provider pilot may use an environment-supplied API key.
 - Never hardcode, log or commit an API key.
 - Agent self-declared metadata is untrusted.
 - Approval, task, purpose, epoch, principal, branch, nonce and provenance never enter tool business arguments.
@@ -17,3 +17,5 @@
 - D0 is AllowAll/default; an unauthorized reached call may commit. Calculate UnsafeCommit afterward.
 - GroundTruthEnforcingPolicy is an E0 infrastructure validation fixture only.
 - Keep ground truth, admission decision and commit state separate in results.
+- Record provider failures as `provider_error` with no endpoint call or implicit retry; keep model configuration and prompt/input digests in experiment metadata.
+- Do not claim general LangGraph vulnerabilities or real LLM results from scripted E0 -E3 validation.

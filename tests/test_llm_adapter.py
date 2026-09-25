@@ -1,9 +1,13 @@
 import json
+import tempfile
 import unittest
+from pathlib import Path
 from dataclasses import replace
 
 from context_launder_bench.adapters.langgraph_adapter import LangGraphAdapter
 from context_launder_bench.backends import AgentInput, ModelBackend, ScriptedBackend
+from context_launder_bench.benchmark import run_model_cases
+from context_launder_bench.model import digest
 from context_launder_bench.llm.deepseek import DeepSeekBackend, DeepSeekConfig
 from context_launder_bench.scenarios import golden_pairs
 
@@ -33,7 +37,9 @@ class FakeChatClient:
 
 
 def response_with_calls(calls):
-    return {"choices": [{"message": {"tool_calls": calls}}]}
+    return {"id": "response-1", "choices": [
+        {"finish_reason": "tool_calls" if calls else "stop",
+         "message": {"tool_calls": calls}}]}
 
 
 def tool_call(arguments):
@@ -81,6 +87,113 @@ class LLMAdapterTests(unittest.TestCase):
         self.assertIn("target_file_id", payload["messages"][0]["content"])
         self.assertIn("\"type\":\"human\"", payload["messages"][0]["content"])
         self.assertNotIn("authorized_action_spec", payload["messages"][0]["content"])
+
+    def test_explicit_deepseek_experiment_parameters_reach_client(self):
+        agent_input = AgentInput("Delete file", {"target_file_id": 13})
+        for config, expected_thinking in (
+            (DeepSeekConfig(model="selected-by-caller", tools=(TOOL_SCHEMA,),
+                            thinking=False, reasoning_effort="none",
+                            temperature=0.2, top_p=1.0, max_tokens=512),
+             "disabled"),
+            (DeepSeekConfig(model="selected-by-caller", tools=(TOOL_SCHEMA,),
+                            thinking=True, reasoning_effort="low",
+                            temperature=None, top_p=0.98, max_tokens=2048),
+             "enabled"),
+        ):
+            with self.subTest(thinking=expected_thinking):
+                client = FakeChatClient(response_with_calls([]))
+                DeepSeekBackend(config, client).run(agent_input)
+                payload = client.calls[0][0]
+                self.assertEqual(payload["model"], "selected-by-caller")
+                self.assertEqual(payload["thinking"], {"type": expected_thinking})
+                self.assertEqual(payload["reasoning_effort"],
+                                 config.reasoning_effort)
+                self.assertEqual(payload["top_p"], config.top_p)
+                self.assertEqual(payload["max_tokens"], config.max_tokens)
+                self.assertEqual(payload.get("temperature"), config.temperature)
+
+        with self.assertRaises(ValueError):
+            DeepSeekBackend(DeepSeekConfig(
+                model="selected-by-caller", tools=(TOOL_SCHEMA,),
+                thinking=True, reasoning_effort="high", temperature=0.0,
+            ))
+
+    def test_model_report_records_reproducible_metadata_without_prompt(self):
+        scenario = replace(golden_pairs()[0][1],
+                           task_text="Delete the requested file")
+        upstream = {"target_file_id": 13}
+        client = FakeChatClient(response_with_calls(tool_call('{"file_id":13}')))
+        backend = DeepSeekBackend(DeepSeekConfig(
+            model="selected-by-caller", tools=(TOOL_SCHEMA,),
+            temperature=0.2, max_tokens=512,
+        ), client)
+        with tempfile.TemporaryDirectory() as directory:
+            results = run_model_cases([(scenario, upstream)], backend, directory)
+            row = json.loads((Path(directory) / "results.json").read_text())[0]
+        metadata = row["experiment_metadata"]
+        self.assertEqual(metadata["provider"], "DeepSeek")
+        self.assertEqual(metadata["model"], "selected-by-caller")
+        self.assertEqual(metadata["model_config"]["temperature"], 0.2)
+        self.assertEqual(metadata["model_config"]["max_tokens"], 512)
+        self.assertEqual(metadata["model_config"]["timeout_seconds"], 30.0)
+        self.assertEqual(metadata["model_config"]["base_url"],
+                         "https://api.deepseek.com")
+        self.assertEqual(metadata["framework"], "LangGraph")
+        self.assertEqual(metadata["scenario_id"], scenario.scenario_id)
+        self.assertEqual(metadata["upstream_input_digest"], digest(upstream))
+        self.assertEqual(metadata["task_digest"], digest(scenario.task_text))
+        self.assertEqual(metadata["provider_response_id"], "response-1")
+        self.assertEqual(metadata["finish_reason"], "tool_calls")
+        self.assertEqual(metadata["prompt_digest"],
+                         digest(client.calls[0][0]["messages"]))
+        self.assertNotIn(scenario.task_text, json.dumps(metadata))
+        self.assertTrue(results[0].committed)
+
+    def test_provider_error_is_reported_and_batch_continues(self):
+        class SequenceClient:
+            def __init__(self):
+                self.responses = iter((
+                    TimeoutError("temporary outage"),
+                    {"error": {"code": "unavailable"}},
+                    response_with_calls([]),
+                    response_with_calls(tool_call("{bad json")),
+                    response_with_calls(tool_call('{"file_id":13}')),
+                ))
+
+            def complete(self, payload, config):
+                response = next(self.responses)
+                if isinstance(response, Exception):
+                    raise response
+                return response
+
+        scenario = replace(golden_pairs()[0][1],
+                           task_text="Delete the requested file")
+        backend = DeepSeekBackend(DeepSeekConfig(
+            model="selected-by-caller", tools=(TOOL_SCHEMA,),
+        ), SequenceClient())
+        with tempfile.TemporaryDirectory() as directory:
+            results = run_model_cases(
+                [(scenario, {"target_file_id": 13})] * 5,
+                backend, directory,
+            )
+            summary = json.loads((Path(directory) / "summary.json").read_text())
+        self.assertEqual([r.attempt_status for r in results], [
+            "provider_error", "provider_error", "no_attempt",
+            "parse_error", "tool_call",
+        ])
+        self.assertEqual(summary["total_runs"], 5)
+        self.assertEqual(summary["provider_error_count"], 2)
+        self.assertEqual(summary["provider_error_rate"], 0.4)
+        self.assertEqual(summary["no_attempt_count"], 1)
+        self.assertEqual(summary["parse_error_count"], 1)
+        self.assertEqual(summary["tool_call_count"], 1)
+        self.assertEqual(summary["committed_count"], 1)
+        for result in results[:2]:
+            self.assertIsNone(result.admission_decision)
+            self.assertIsNone(result.ground_truth_authorized)
+            self.assertFalse(result.committed)
+            self.assertFalse(any(event.kind == "ToolPrepare"
+                                 for event in result.events))
 
     def test_deepseek_statuses_are_not_filled_from_fixture(self):
         scenario = replace(golden_pairs()[0][1], task_text="Delete a file")

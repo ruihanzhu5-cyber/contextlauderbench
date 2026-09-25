@@ -117,9 +117,14 @@ def apply_channel(state: ExecutionState, scenario: Scenario) -> None:
         if scenario.family == "fork_join":
             return
         rt.spawn("executor-main", "aux", "aux-branch")
-        aux = rt.seed_value("channel-witness", "trusted_workflow", state.context_ref)
-        state.value_id = rt.join("executor-main", (state.value_id, aux.value_id),
-                                 dict(scenario.arguments), state.context_ref).value_id
+        parent = state.value_id
+        target = rt.derive((parent,), rt.value(parent).payload,
+                           "channel-branch-A", state.context_ref)
+        aux = rt.derive((parent,), "channel-witness",
+                        "channel-branch-B", state.context_ref)
+        state.value_id = rt.join("executor-main",
+                                 (target.value_id, aux.value_id),
+                                 rt.value(parent).payload, state.context_ref).value_id
     else:
         raise ValueError(f"Unknown channel: {scenario.channel}")
 
@@ -135,7 +140,8 @@ def finish_scenario(scenario: Scenario, state: ExecutionState,
     # Self-declared metadata stays inert text, outside trusted runtime facts.
     if intent.self_declared_metadata:
         state.runtime.event("AgentText", payload_digest=digest(intent.self_declared_metadata))
-    if intent.status not in {"tool_call", "no_attempt", "parse_error"}:
+    if intent.status not in {"tool_call", "no_attempt", "parse_error",
+                             "provider_error"}:
         raise ValueError(f"Unknown agent status: {intent.status}")
 
     if model_mode:
@@ -170,8 +176,11 @@ def finish_scenario(scenario: Scenario, state: ExecutionState,
         ground_truth_authorized = GroundTruthOracle().authorized(state.runtime, request)
     elif intent.status == "no_attempt":
         state.runtime.event("NoAttempt")
-    else:
+    elif intent.status == "parse_error":
         state.runtime.event("ParseError", reason_code=intent.error or "invalid_tool_call")
+    else:
+        state.runtime.event("ProviderError",
+                            reason_code=intent.error or "provider_unavailable")
 
     committed = outcome.committed if outcome else False
     state.runtime.event(
