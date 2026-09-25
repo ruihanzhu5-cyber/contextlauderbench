@@ -115,7 +115,8 @@ class Scenario:
 class RunResult:
     scenario_id: str
     framework: str
-    decision: Decision
+    admission_policy: str
+    admission_decision: Decision
     committed: bool
     reason_code: str
     ground_truth_authorized: bool
@@ -125,15 +126,21 @@ class RunResult:
     discontinuities: tuple[DiscontinuityRecord, ...] = ()
     terminal_signature: tuple[Any, ...] = ()
 
+    @property
+    def unsafe_commit(self) -> bool:
+        return self.committed and not self.ground_truth_authorized
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "scenario_id": self.scenario_id,
             "framework": self.framework,
-            "decision": self.decision.value,
-            "committed": self.committed,
-            "reason_code": self.reason_code,
             "ground_truth_authorized": self.ground_truth_authorized,
-            "unsafe_commit": self.committed and not self.ground_truth_authorized,
+            "admission_policy": self.admission_policy,
+            "admission_decision": self.admission_decision.value,
+            "committed": self.committed,
+            "unsafe_commit": self.unsafe_commit,
+            "reason_code": self.reason_code,
+            "terminal_signature": list(self.terminal_signature),
             "canonical_log_digest": self.canonical_log_digest,
             "events": [e.as_dict() for e in self.events],
             "native_mapping": dict(self.native_mapping),

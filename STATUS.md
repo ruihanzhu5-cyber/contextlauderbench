@@ -1,22 +1,24 @@
 # Status
 
 Date: 2026-09-25
-Current phase: E0–E3-mini complete
+Current scope: E0–E3-mini audited and repaired. E4 paused at user request.
 
-| Phase | Content | Tests and gate | Issues | Next |
-|---|---|---|---|---|
-| E0 | Framework-free immutable models, trusted runtime/provenance/approvals, oracle, sole mock endpoint, four golden pairs | PASS: 4 attack DENY, 4 legal ALLOW; terminal equality; metadata, missing provenance, forged context/family, bypass, replay, unknown capability and business-argument mutation checks | Windows sandbox helper initialization failed; WSL path works | Complete |
-| E1 | LangGraph 1.2.12 native messages, shared state, InMemorySaver checkpoint, task switch and fork–join; same oracle/endpoint; D0–D3 sanity admission report | PASS: 4 pairs through graph, 8 LangGraph golden results with prepare/decision/commit-or-reject events; requirements.lock pinned | None | Complete |
-| E2 | Message/shared-state/memory/task-switch/endpoint observations; five-kind DiscontinuityRecord and trace-linked JSON/CSV/Markdown matrix | PASS: all five boundaries and evidence references validated | Observations describe this integration, not framework-wide security behavior | Complete |
-| E3-mini | 8 validated templates, generated twins and 3 channels, fixed-seed grouped split, both scripted runners | PASS: 48 generated cases; 96 adapter runs, 48 attacks denied, 48 legal allowed, 0 unsafe commits; full suite 15 tests | Dataset is architecture validation only | Complete |
+| Phase | Corrected gate | Evidence | Status |
+|---|---|---|---|
+| E0 | Framework-free oracle/runtime/endpoint validated with dedicated GroundTruthEnforcingPolicy | 4 attack DENY, 4 legal ALLOW; matched calls; mutation, bypass, replay, purity tests | PASS |
+| E1 | LangGraph golden pairs under active D0–D3 policies | 32 traces; each policy 8 commits, including 4 UnsafeCommits | PASS |
+| E2 | Five boundaries and five-kind schema with actual policy enforcement labels | JSON/CSV/Markdown matrix and event IDs; D0 context present but unenforced | PASS |
+| E3-mini | 8 templates × 3 channels × twins; both adapters × D0–D3 | 48 unique cases, 384 runs, 192 UnsafeCommits | PASS |
+
+Full unittest suite: 20 tests passed. Reports were regenerated after the responsibility fix. See AUDIT_GROUND_TRUTH_ADMISSION.md for the original defect, corrected design, per-policy counts and evidence.
 
 ## Deliverables
 
-- reports/golden: E1 golden results, D0–D3 admission baselines, traces, E2 discontinuities and matrix.
-- reports/latest: E3-mini results, split, version/lock/commit metadata, discontinuities and matrix.
-- requirements.in and requirements.lock: exact LangGraph version and resolved dependencies.
-- README.md: install, test, and run instructions.
+- reports/golden/admission_traces.csv and baselines.json: every E1 LangGraph D0–D3 trajectory with ground_truth_authorized, admission_policy, admission_decision, committed and unsafe_commit.
+- reports/latest: E3-mini results, summary, discontinuities and boundary matrix.
+- requirements.lock: pinned LangGraph 1.2.12 environment.
+- SPEC.md, DECISIONS.md, README.md and AGENTS.md: corrected architecture and operating rules.
 
 ## Remaining limits
 
-Only scripted inputs and mock side effects were tested. No LLM, second framework, E4+ defense, concurrent revocation, large-scale statistics, or real external tool is included. Python process compromise and arbitrary adapter code execution are outside the agent-data threat model. The current eight-template sample should not be used for statistical claims. The five-category E2 schema is ready, but this small integration does not produce every category (for example, it has no summary transformation).
+Only scripted input and mock effects are included. The eight-template sample is architecture validation, not a statistical result. There is no LLM, second framework, real external effect, concurrent revocation study or E4 defense. Arbitrary Python process compromise is outside the agent-data threat model.

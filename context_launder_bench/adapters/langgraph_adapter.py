@@ -22,8 +22,8 @@ class GraphState(TypedDict, total=False):
 class LangGraphAdapter:
     """Native graph transport; all security facts remain in TrustedRuntime."""
 
-    def run(self, scenario: Scenario) -> RunResult:
-        state = prepare_scenario(scenario)
+    def run(self, scenario: Scenario, policy_id: str = "D0") -> RunResult:
+        state = prepare_scenario(scenario, policy_id)
         mapping: dict[str, str] = {}
         builder = StateGraph(GraphState)
         message_id = f"message-{scenario.scenario_id}"

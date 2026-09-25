@@ -14,3 +14,9 @@
 - A crash is not a successful defense.
 - E3-mini is generator-first; do not handwrite the complete task matrix.
 - Preserve user files. Keep all project files under this directory.
+
+- GroundTruthOracle is read-only and returns only a Boolean authorization label.
+- E1–E3 endpoint admission must use the selected D0–D3 AdmissionPolicy, never GroundTruthEnforcingPolicy.
+- D0 is AllowAll/default; an unauthorized reached call may commit. Calculate UnsafeCommit after execution.
+- GroundTruthEnforcingPolicy is an E0 infrastructure validation fixture only.
+- Keep ground truth, admission decision, and commit state as separate result fields.

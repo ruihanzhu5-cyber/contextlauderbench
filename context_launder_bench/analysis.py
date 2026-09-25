@@ -5,7 +5,8 @@ import json
 from pathlib import Path
 from .model import DiscontinuityKind, DiscontinuityRecord, RunResult
 
-FIELDS = ("source", "task", "branch", "purpose", "epoch", "approval_binding")
+AUTH_FIELDS = ("source", "task", "branch", "purpose", "epoch", "approval_binding")
+OBSERVED_FIELDS = AUTH_FIELDS + ("tool_allowlist", "executor_capability")
 
 
 def classify_result(result: RunResult) -> tuple[DiscontinuityRecord, ...]:
@@ -17,7 +18,7 @@ def classify_result(result: RunResult) -> tuple[DiscontinuityRecord, ...]:
         data = dict(event.data)
         represented = set(data["represented_fields"])
         enforced = set(data["enforced_fields"])
-        for field in FIELDS:
+        for field in OBSERVED_FIELDS:
             kind = (DiscontinuityKind.UNREPRESENTED if field not in represented else
                     DiscontinuityKind.PRESERVED_AND_ENFORCED if field in enforced else
                     DiscontinuityKind.PRESENT_BUT_UNENFORCED)
@@ -68,9 +69,13 @@ def export_boundaries(results, output_dir):
     ]
     for key, values in sorted(matrix.items()):
         framework, run_id, boundary = key
-        cells = [values.get(field, DiscontinuityKind.UNREPRESENTED.value) for field in FIELDS]
-        enforcement = (DiscontinuityKind.PRESERVED_AND_ENFORCED.value if boundary == "endpoint"
-                       else DiscontinuityKind.PRESENT_BUT_UNENFORCED.value)
+        cells = [values.get(field, DiscontinuityKind.UNREPRESENTED.value) for field in AUTH_FIELDS]
+        enforcement = (
+            DiscontinuityKind.PRESERVED_AND_ENFORCED.value
+            if any(value == DiscontinuityKind.PRESERVED_AND_ENFORCED.value
+                   for value in values.values())
+            else DiscontinuityKind.PRESENT_BUT_UNENFORCED.value
+        )
         refs = ",".join(dict.fromkeys(evidence[key]))
         lines.append("| " + " | ".join([framework, run_id, boundary] + cells +
                                      [enforcement, refs]) + " |")

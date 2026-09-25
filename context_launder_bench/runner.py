@@ -6,7 +6,8 @@ from typing import Any
 from .backends import ScriptedBackend
 from .endpoint import UnifiedMockEndpoint
 from .model import Decision, RunResult, Scenario, digest
-from .oracle import AuthorizationOracle
+from .oracle import GroundTruthOracle
+from .policies import AdmissionPolicy, GroundTruthEnforcingPolicy, policy_from_id
 from .runtime import TrustedRuntime
 
 
@@ -19,9 +20,17 @@ class ExecutionState:
     native_mapping: dict[str, str] = field(default_factory=dict)
 
 
-def prepare_scenario(scenario: Scenario) -> ExecutionState:
+def prepare_scenario(scenario: Scenario, policy_id: str = "D0") -> ExecutionState:
+    return _prepare_scenario(scenario, policy_from_id(policy_id))
+
+
+def prepare_e0_scenario(scenario: Scenario) -> ExecutionState:
+    return _prepare_scenario(scenario, GroundTruthEnforcingPolicy())
+
+
+def _prepare_scenario(scenario: Scenario, admission_policy: AdmissionPolicy) -> ExecutionState:
     runtime = TrustedRuntime(scenario.scenario_id, scenario.family)
-    endpoint = UnifiedMockEndpoint(runtime, AuthorizationOracle())
+    endpoint = UnifiedMockEndpoint(runtime, admission_policy)
     runtime.grant_capability(scenario.capability_id, scenario.executor_id, [scenario.tool_name])
     action = digest({"tool": scenario.tool_name, "arguments": scenario.arguments})
     context_ref = runtime.begin_task("user-A", "T2", "main", "execute-request",
@@ -103,11 +112,24 @@ def finish_scenario(scenario: Scenario, state: ExecutionState,
         scenario.tool_name, intent.arguments, scenario.executor_id,
         scenario.capability_id, scenario.callsite_id, state.context_ref, state.value_id
     )
-    outcome = state.endpoint.invoke(request, scenario.family)
+    outcome = state.endpoint.invoke(request)
+    ground_truth_authorized = GroundTruthOracle().authorized(state.runtime, request)
+    state.runtime.event(
+        "OutcomeEvaluated",
+        ground_truth_authorized=ground_truth_authorized,
+        unsafe_commit=outcome.committed and not ground_truth_authorized,
+    )
+    if outcome.committed:
+        endorsement = state.runtime.valid_endorsement(
+            request, state.runtime.scenario_family
+        )
+        if endorsement is not None:
+            state.runtime.consume_endorsement(endorsement.nonce)
     from .analysis import classify_result
     result = RunResult(
-        scenario.scenario_id, framework, outcome.decision, outcome.committed,
-        outcome.reason_code, scenario.legal, state.runtime.events,
+        scenario.scenario_id, framework, outcome.admission_policy,
+        outcome.admission_decision, outcome.committed, outcome.reason_code,
+        ground_truth_authorized, state.runtime.events,
         state.runtime.canonical_log_digest(), native_mapping or {},
         terminal_signature=scenario.terminal_signature()
     )
@@ -115,7 +137,13 @@ def finish_scenario(scenario: Scenario, state: ExecutionState,
     return replace(result, discontinuities=classify_result(result))
 
 
-def run_free(scenario: Scenario) -> RunResult:
-    state = prepare_scenario(scenario)
+def run_free(scenario: Scenario, policy_id: str = "D0") -> RunResult:
+    state = prepare_scenario(scenario, policy_id)
+    apply_channel(state, scenario)
+    return finish_scenario(scenario, state, "framework-free")
+
+
+def run_e0(scenario: Scenario) -> RunResult:
+    state = prepare_e0_scenario(scenario)
     apply_channel(state, scenario)
     return finish_scenario(scenario, state, "framework-free")

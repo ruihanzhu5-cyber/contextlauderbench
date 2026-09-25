@@ -9,6 +9,7 @@ from context_launder_bench.endpoint import UnifiedMockEndpoint
 from context_launder_bench.generator import (
     TEMPLATES, split_generator, validate_dataset,
 )
+from context_launder_bench.policies import POLICY_IDS
 from context_launder_bench.scenarios import CHANNELS, FAMILIES, validate_pair
 
 
@@ -32,19 +33,23 @@ class E3MiniTests(unittest.TestCase):
     def test_full_scripted_benchmark_uses_one_endpoint(self):
         original = UnifiedMockEndpoint.invoke
         calls = []
-        def counted(endpoint, request, family):
-            calls.append((request.tool_name, family))
-            return original(endpoint, request, family)
+        def counted(endpoint, request):
+            calls.append(request.tool_name)
+            return original(endpoint, request)
         with tempfile.TemporaryDirectory() as directory:
             with patch.object(UnifiedMockEndpoint, "invoke", counted):
                 results = run_benchmark(directory, seed=42)
-            self.assertEqual(len(results), 96)
-            self.assertEqual(len(calls), 96)
+            self.assertEqual(len(results), 384)
+            self.assertEqual(len(calls), 384)
             summary = json.loads((Path(directory) / "summary.json").read_text())
-            self.assertEqual(summary["attacks_denied"], 48)
-            self.assertEqual(summary["legal_allowed"], 48)
-            self.assertEqual(summary["unsafe_commits"], 0)
+            self.assertEqual(summary["unique_scenarios"], 48)
+            self.assertEqual(summary["ground_truth_unauthorized"], 192)
+            self.assertEqual(summary["ground_truth_authorized"], 192)
+            self.assertEqual(summary["committed"], 384)
+            self.assertEqual(summary["unsafe_commits"], 192)
+            self.assertEqual(set(summary["by_policy"]), set(POLICY_IDS))
             self.assertTrue(all(r.discontinuities for r in results))
+            self.assertTrue(all(r.admission_policy in POLICY_IDS for r in results))
             self.assertTrue((Path(directory) / "boundary_matrix.md").exists())
 
 

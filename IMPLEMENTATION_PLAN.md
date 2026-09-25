@@ -6,3 +6,7 @@
 4. E3-mini: parameterized template, twin, channel, and split generators; automatic equality validation; run both adapters and save results.
 
 Each gate updates STATUS.md after passing. Only then begin the next phase.
+
+## 2026-09-25 audit correction
+
+The initial E1–E3 endpoint incorrectly used the ground-truth oracle as its admission gate. The implementation now has a Boolean GroundTruthOracle, an E0-only enforcing policy, and active D0–D3 AdmissionPolicy implementations. E1 runs all four policies over four golden pairs; E2 records enforcement by selected policy; E3-mini runs both adapters under all four policies. No E4 work is scheduled while this audit is active.

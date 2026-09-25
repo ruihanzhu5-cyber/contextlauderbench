@@ -23,9 +23,9 @@ class Endorsement:
 class TrustedRuntime:
     """Trusted, deterministic ledger. Agent payload cannot mint any ledger fact."""
 
-    def __init__(self, run_id: str, policy_family: str):
+    def __init__(self, run_id: str, scenario_family: str):
         self.run_id = run_id
-        self.__policy_family = policy_family
+        self.__scenario_family = scenario_family
 
         self.__events: list[Event] = []
         self.__contexts: dict[str, TrustedAuthorizationContext] = {}
@@ -44,8 +44,8 @@ class TrustedRuntime:
         self.__context_counter = 0
 
     @property
-    def policy_family(self) -> str:
-        return self.__policy_family
+    def scenario_family(self) -> str:
+        return self.__scenario_family
 
     @property
     def events(self) -> tuple[Event, ...]:
